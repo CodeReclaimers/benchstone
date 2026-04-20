@@ -1,0 +1,60 @@
+from __future__ import annotations
+
+import math
+
+import pytest
+
+from benchstone.stats import directed_sigma, mean_se
+
+
+def test_mean_se_basic() -> None:
+    mean, se = mean_se([1.0, 2.0, 3.0, 4.0, 5.0])
+    assert mean == pytest.approx(3.0)
+    # sample variance = 2.5, SE = sqrt(2.5 / 5) = sqrt(0.5)
+    assert se == pytest.approx(math.sqrt(0.5))
+
+
+def test_mean_se_requires_two_samples() -> None:
+    with pytest.raises(ValueError, match="at least 2 samples"):
+        mean_se([1.0])
+    with pytest.raises(ValueError, match="at least 2 samples"):
+        mean_se([])
+
+
+def test_directed_sigma_minimize_improvement_positive() -> None:
+    baseline = [10.0, 10.1, 9.9, 10.05, 9.95]
+    candidate = [9.0, 9.1, 8.9, 9.05, 8.95]  # lower is better for minimize
+    sigma = directed_sigma(baseline, candidate, "minimize")
+    assert sigma > 0
+
+
+def test_directed_sigma_maximize_improvement_positive() -> None:
+    baseline = [10.0, 10.1, 9.9, 10.05, 9.95]
+    candidate = [11.0, 11.1, 10.9, 11.05, 10.95]  # higher is better for maximize
+    sigma = directed_sigma(baseline, candidate, "maximize")
+    assert sigma > 0
+
+
+def test_directed_sigma_regression_negative() -> None:
+    baseline = [10.0, 10.1, 9.9, 10.05, 9.95]
+    candidate = [11.0, 11.1, 10.9, 11.05, 10.95]  # worse for minimize
+    sigma = directed_sigma(baseline, candidate, "minimize")
+    assert sigma < 0
+
+
+def test_directed_sigma_identical_samples_zero() -> None:
+    xs = [1.0, 2.0, 3.0]
+    assert directed_sigma(xs, xs, "minimize") == 0.0
+
+
+def test_directed_sigma_zero_variance_differing_means() -> None:
+    baseline = [1.0, 1.0, 1.0]
+    candidate = [2.0, 2.0, 2.0]
+    # worse for minimize, better for maximize
+    assert directed_sigma(baseline, candidate, "minimize") == -math.inf
+    assert directed_sigma(baseline, candidate, "maximize") == math.inf
+
+
+def test_directed_sigma_rejects_bad_direction() -> None:
+    with pytest.raises(ValueError, match="direction must be"):
+        directed_sigma([1.0, 2.0], [1.0, 2.0], "sideways")

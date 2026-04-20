@@ -1,7 +1,7 @@
 [project]
 name = "FakeProject"
 language = "python"
-invocation = "python bench/benchmarks.py --entry={entry_point} --config={config_path} --output={output_path}"
+invocation = "python3 bench/benchmarks.py --entry={entry_point} --config={config_path} --output={output_path}"
 
 [[benchmarks]]
 name = "fake_quality"
