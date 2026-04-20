@@ -38,3 +38,7 @@ def logs_dir() -> Path:
 
 def jobs_dir() -> Path:
     return benchstone_home() / "jobs"
+
+
+def artifacts_dir() -> Path:
+    return benchstone_home() / "artifacts"

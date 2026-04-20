@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import hashlib
 import os
 import random
+import shutil
 import subprocess
 import tempfile
 import time
@@ -73,6 +75,7 @@ def execute(
     store: Store,
     host: str,
     logs_root: Path,
+    artifacts_root: Path | None = None,
 ) -> list[int]:
     """Run the benchmark per `plan` and persist one row per repetition.
 
@@ -104,6 +107,7 @@ def execute(
             store=store,
             host=host,
             logs_root=logs_root,
+            artifacts_root=artifacts_root,
             diff_path=diff_path,
         )
         inserted.append(rid)
@@ -121,6 +125,7 @@ def _run_one_rep(
     store: Store,
     host: str,
     logs_root: Path,
+    artifacts_root: Path | None,
     diff_path: str | None,
 ) -> int:
     now = datetime.now(timezone.utc)
@@ -146,11 +151,16 @@ def _run_one_rep(
         stderr_log_path=str(stderr_log_path),
     )
 
+    is_correctness = benchmark.tier == "correctness"
+    artifact_hash: str | None = None
+    archived_artifact: str | None = None
+
     try:
         with tempfile.TemporaryDirectory(prefix="benchstone-") as tmp:
             tmp_dir = Path(tmp)
             config_path = tmp_dir / "config.json"
             output_path = tmp_dir / "result.json"
+            artifact_path = (tmp_dir / "artifact.bin") if is_correctness else None
             corpus_path = (
                 str((project_path / benchmark.corpus_path).resolve())
                 if benchmark.corpus_path else ""
@@ -161,6 +171,7 @@ def _run_one_rep(
                 corpus_path=corpus_path,
                 repetition_index=rep_idx,
                 repetition_total=rep_total,
+                artifact_path=str(artifact_path) if artifact_path else None,
             ).write(config_path)
 
             cmd = _format_invocation(
@@ -190,6 +201,20 @@ def _run_one_rep(
                 )
 
             result = ProjectResult.read(output_path)
+
+            if is_correctness:
+                if artifact_path is None or not artifact_path.exists():
+                    return store.insert_run(
+                        **base,
+                        status="error",
+                        wall_clock_seconds=elapsed,
+                        project_metadata={
+                            "error": "correctness benchmark did not produce an artifact",
+                        },
+                    )
+                artifact_hash, archived_artifact = _archive_artifact(
+                    artifact_path, project.name, benchmark.name, artifacts_root
+                )
     except (ProtocolError, FileNotFoundError, OSError) as exc:
         return store.insert_run(
             **base,
@@ -207,6 +232,8 @@ def _run_one_rep(
             result.wall_clock_seconds if result.wall_clock_seconds is not None else elapsed
         ),
         project_metadata=result.metadata or None,
+        artifact_hash=artifact_hash,
+        artifact_path=archived_artifact,
     )
 
 
@@ -234,3 +261,27 @@ def _persist_diff(
     path = log_dir / f"{ts_tag}.diff"
     path.write_text(diff)
     return str(path)
+
+
+def _archive_artifact(
+    src: Path,
+    project_name: str,
+    benchmark_name: str,
+    artifacts_root: Path | None,
+) -> tuple[str, str]:
+    """Content-address the run's artifact under ``artifacts_root`` and return
+    ``(sha256:<hex>, absolute_archived_path)``. Existing entries at the same
+    hash are left in place — correctness artifacts are deduplicated across
+    runs that produce identical bytes."""
+    if artifacts_root is None:
+        raise RunnerError(
+            "correctness benchmark produced an artifact but no artifacts_root "
+            "was configured for this run"
+        )
+    digest = hashlib.sha256(src.read_bytes()).hexdigest()
+    dest_dir = artifacts_root / project_name / benchmark_name
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    dest = dest_dir / f"{digest}.bin"
+    if not dest.exists():
+        shutil.copy2(src, dest)
+    return f"sha256:{digest}", str(dest)

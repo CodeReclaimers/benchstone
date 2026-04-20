@@ -59,6 +59,7 @@ def main(argv: list[str] | None = None) -> int:
                 store=store,
                 host=spec["host"],
                 logs_root=paths.logs_dir(),
+                artifacts_root=paths.artifacts_dir(),
             )
             if spec.get("set_baseline"):
                 established_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")

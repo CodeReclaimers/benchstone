@@ -117,6 +117,84 @@ def test_execute_allows_dirty_with_override_and_saves_diff(
         assert "drift marker" in diff_file.read_text()
 
 
+def test_execute_correctness_archives_artifact(
+    fake_project_git: Path, tmp_path: Path
+) -> None:
+    """A correctness-tier run produces a byte artifact that the runner archives
+    content-addressed under artifacts_root, and the hash is written to the row."""
+    from benchstone.runner import plan_evaluation
+
+    manifest = load_manifest(fake_project_git)
+    bench = manifest.benchmark("fake_correctness")
+    gstate = git_state(fake_project_git)
+    plan = plan_evaluation(bench, gstate, allow_dirty=False, meta_seed=7)
+
+    artifacts_root = tmp_path / "artifacts"
+    with Store(tmp_path / "store.db") as store:
+        ids = execute(
+            project=manifest.project,
+            project_path=fake_project_git,
+            benchmark=bench,
+            plan=plan,
+            store=store,
+            host="testhost",
+            logs_root=tmp_path / "logs",
+            artifacts_root=artifacts_root,
+        )
+        assert len(ids) == 1
+        run = store.get_run(ids[0])
+        assert run is not None
+        assert run.status == "ok"
+        assert run.artifact_hash is not None
+        assert run.artifact_hash.startswith("sha256:")
+        assert run.artifact_path is not None
+        archived = Path(run.artifact_path)
+        assert archived.exists()
+        assert archived.read_bytes() == b"fake correctness artifact v1\n"
+        # Archive path is content-addressed.
+        assert archived.name == run.artifact_hash.split(":", 1)[1] + ".bin"
+        # And lives under the project/benchmark subtree of artifacts_root.
+        assert artifacts_root in archived.parents
+
+
+def test_execute_correctness_missing_artifact_records_error(
+    fake_project_git: Path, tmp_path: Path
+) -> None:
+    """Break the entry point so it does not write the artifact file; the runner
+    must record status='error' with a helpful message."""
+    from benchstone.runner import plan_evaluation
+
+    bench_py = fake_project_git / "bench" / "benchmarks.py"
+    patched = bench_py.read_text().replace(
+        'Path(artifact_path).write_bytes(content)',
+        'pass  # deliberately fail to write artifact',
+    )
+    bench_py.write_text(patched)
+
+    manifest = load_manifest(fake_project_git)
+    bench = manifest.benchmark("fake_correctness")
+    gstate = git_state(fake_project_git)
+    plan = plan_evaluation(bench, gstate, allow_dirty=True, meta_seed=9)
+
+    with Store(tmp_path / "store.db") as store:
+        ids = execute(
+            project=manifest.project,
+            project_path=fake_project_git,
+            benchmark=bench,
+            plan=plan,
+            store=store,
+            host="testhost",
+            logs_root=tmp_path / "logs",
+            artifacts_root=tmp_path / "artifacts",
+        )
+        run = store.get_run(ids[0])
+        assert run is not None
+        assert run.status == "error"
+        assert run.artifact_hash is None
+        meta = run.project_metadata or {}
+        assert "artifact" in (meta.get("error") or "").lower()
+
+
 def test_execute_captures_subprocess_failure(
     fake_project_git: Path, tmp_path: Path
 ) -> None:

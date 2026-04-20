@@ -12,6 +12,11 @@ class InvocationConfig:
 
     Written to the path given by `{config_path}` in the manifest's invocation
     template; read back by the project's benchmark script.
+
+    ``artifact_path`` is set for correctness-tier benchmarks only: the project
+    is expected to write a byte artifact to that path, and the harness hashes
+    and archives it for later byte-equivalence comparison. For non-correctness
+    benchmarks it is null and the project should ignore it.
     """
 
     benchmark: str
@@ -19,6 +24,7 @@ class InvocationConfig:
     corpus_path: str
     repetition_index: int
     repetition_total: int
+    artifact_path: str | None = None
 
     def to_json(self) -> str:
         return json.dumps(asdict(self), sort_keys=True)

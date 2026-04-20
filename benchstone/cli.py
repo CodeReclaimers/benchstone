@@ -6,10 +6,11 @@ from pathlib import Path
 
 import click
 
-from . import __version__, background, jobs, paths
+from . import __version__, background, jobs, paths, references
 from .gate import Verdict, evaluate as gate_evaluate
 from .manifest import Benchmark, ManifestError, Project, load as load_manifest
 from .provenance import GitState, ProvenanceError, git_state
+from .references import ReferenceError
 from .registry import Registry, RegistryError
 from .runner import (
     RunPlan,
@@ -19,7 +20,7 @@ from .runner import (
     plan_evaluation,
 )
 from .scheduler import HostCapacity, SchedulerError, admit
-from .store import Store
+from .store import Run, Store
 
 
 @click.group()
@@ -184,6 +185,71 @@ def promote(
     click.echo(f"baseline promoted: {project.name}/{benchmark.name} -> {gstate.sha[:10]}")
 
 
+@main.command("freeze-reference")
+@click.argument("project_name")
+@click.argument("benchmark_name")
+@click.option("--from-run", "run_id", type=int, default=None,
+              help="Run ID whose artifact becomes the reference. "
+                   "Defaults to the latest run at the current SHA.")
+@click.option("--notes", default=None)
+def freeze_reference_cmd(
+    project_name: str, benchmark_name: str, run_id: int | None, notes: str | None,
+) -> None:
+    """Capture a correctness benchmark's run artifact as the frozen reference."""
+    project_path, project, benchmark = _resolve(project_name, benchmark_name)
+    if benchmark.tier != "correctness":
+        raise click.ClickException(
+            f"freeze-reference only applies to correctness-tier benchmarks; "
+            f"{benchmark.name!r} is tier={benchmark.tier}"
+        )
+    run = _resolve_artifact_run(project, benchmark, project_path, run_id)
+    try:
+        ref = references.freeze(project.name, benchmark.name, run, notes=notes)
+    except ReferenceError as exc:
+        raise click.ClickException(str(exc))
+    click.echo(
+        f"frozen reference: {project.name}/{benchmark.name}  "
+        f"content_hash={ref.content_hash}  from_run={ref.from_run_id}"
+    )
+
+
+@main.command("replace-reference")
+@click.argument("project_name")
+@click.argument("benchmark_name")
+@click.option("--reason", required=True,
+              help="Required: the reason the reference is being replaced (logged to history).")
+@click.option("--from-run", "run_id", type=int, default=None,
+              help="Run ID whose artifact becomes the new reference. "
+                   "Defaults to the latest run at the current SHA.")
+@click.option("--notes", default=None)
+def replace_reference_cmd(
+    project_name: str,
+    benchmark_name: str,
+    reason: str,
+    run_id: int | None,
+    notes: str | None,
+) -> None:
+    """Replace the frozen reference and record the replacement in history."""
+    project_path, project, benchmark = _resolve(project_name, benchmark_name)
+    if benchmark.tier != "correctness":
+        raise click.ClickException(
+            f"replace-reference only applies to correctness-tier benchmarks; "
+            f"{benchmark.name!r} is tier={benchmark.tier}"
+        )
+    run = _resolve_artifact_run(project, benchmark, project_path, run_id)
+    try:
+        ref = references.replace(
+            project.name, benchmark.name, run, reason=reason, notes=notes
+        )
+    except ReferenceError as exc:
+        raise click.ClickException(str(exc))
+    click.echo(
+        f"replaced reference: {project.name}/{benchmark.name}  "
+        f"new_content_hash={ref.content_hash}  from_run={ref.from_run_id}  "
+        f"reason={reason!r}"
+    )
+
+
 @main.command("status")
 @click.option("--all", "show_all", is_flag=True, default=False,
               help="Include terminal (done/failed/stale) jobs as well as active ones.")
@@ -295,6 +361,7 @@ def _dispatch(
                 store=store,
                 host=host,
                 logs_root=paths.logs_dir(),
+                artifacts_root=paths.artifacts_dir(),
             )
         except RunnerError as exc:
             raise click.ClickException(str(exc))
@@ -317,10 +384,50 @@ def _decide_background(benchmark: Benchmark, flag: bool | None) -> bool:
     return benchmark.background_required
 
 
+def _resolve_artifact_run(
+    project: Project, benchmark: Benchmark, project_path: Path, run_id: int | None,
+) -> Run:
+    """Look up the Run whose artifact should become (or replace) the reference.
+
+    Explicit ``--from-run`` takes precedence; otherwise picks the latest run at
+    the current SHA that produced an artifact.
+    """
+    with Store(paths.store_path()) as store:
+        if run_id is not None:
+            run = store.get_run(run_id)
+            if run is None:
+                raise click.ClickException(f"no run with id={run_id}")
+            if run.project != project.name or run.benchmark != benchmark.name:
+                raise click.ClickException(
+                    f"run id={run_id} belongs to {run.project}/{run.benchmark}, "
+                    f"not {project.name}/{benchmark.name}"
+                )
+            return run
+        gstate = _require_git_state(project_path)
+        candidates = store.fetch_candidate_runs(
+            project.name, benchmark.name, gstate.sha
+        )
+        with_artifact = [r for r in candidates if r.artifact_hash is not None]
+        if not with_artifact:
+            raise click.ClickException(
+                f"no run with an artifact at current SHA {gstate.sha[:10]}; "
+                f"run `bench run {project.name} {benchmark.name}` first, or pass --from-run"
+            )
+        return with_artifact[-1]
+
+
 def _compute_verdict(
     project: Project, benchmark: Benchmark, project_path: Path, current_sha: str
 ) -> Verdict:
     with Store(paths.store_path()) as store:
+        if benchmark.tier == "correctness":
+            reference = references.get(project.name, benchmark.name)
+            candidate_runs = store.fetch_candidate_runs(
+                project.name, benchmark.name, current_sha
+            )
+            return gate_evaluate(
+                benchmark, None, [], candidate_runs, reference=reference
+            )
         baseline_row = store.get_baseline(project.name, benchmark.name)
         if baseline_row is None:
             return gate_evaluate(benchmark, None, [], [])
@@ -338,24 +445,36 @@ def _print_verdict(
 ) -> None:
     click.echo(f"{project.name} / {benchmark.name}")
     click.echo(f"  current_sha: {current_sha[:10]}")
-    click.echo(f"  direction:   {benchmark.metric_direction}")
-    if v.sigma is not None:
-        click.echo(
-            f"  baseline:    mean={v.baseline_mean:.6f}  se={v.baseline_se:.6f}"
-        )
-        click.echo(
-            f"  candidate:   mean={v.candidate_mean:.6f}  se={v.candidate_se:.6f}"
-        )
-        click.echo(f"  sigma:       {v.sigma:+.3f}  (threshold {v.threshold:.3f})")
+    click.echo(f"  tier:        {benchmark.tier}")
+    if benchmark.tier == "correctness":
+        if v.reference_hash is not None:
+            click.echo(f"  reference:   {v.reference_hash}")
+        if v.candidate_hash is not None:
+            click.echo(f"  candidate:   {v.candidate_hash}")
+    else:
+        click.echo(f"  direction:   {benchmark.metric_direction}")
+        if v.sigma is not None:
+            click.echo(
+                f"  baseline:    mean={v.baseline_mean:.6f}  se={v.baseline_se:.6f}"
+            )
+            click.echo(
+                f"  candidate:   mean={v.candidate_mean:.6f}  se={v.candidate_se:.6f}"
+            )
+            click.echo(
+                f"  sigma:       {v.sigma:+.3f}  (threshold {v.threshold:.3f})"
+            )
     click.echo(f"  verdict:     {v.kind}  {v.reason}")
 
 
 def _verdict_exit_code(v: Verdict) -> int:
     return {
         "PROMOTE": 0,
+        "PASS": 0,
         "REJECT": 1,
+        "FAIL": 1,
         "NEEDS_MORE_DATA": 2,
         "NO_BASELINE": 2,
+        "NO_REFERENCE": 2,
     }.get(v.kind, 3)
 
 
@@ -367,11 +486,17 @@ def _summarize_runs(store: Store, ids: list[int], plan: RunPlan) -> None:
         if r is None:
             continue
         if r.status == "ok":
-            click.echo(f"  [rep {r.repetition_index} seed={r.seed}] "
-                       f"metric={r.metric:.6f}  wall={r.wall_clock_seconds:.3f}s")
+            metric_fmt = f"metric={r.metric:.6f}" if r.metric is not None else "metric=-"
+            art = f"  artifact={r.artifact_hash[:18]}..." if r.artifact_hash else ""
+            click.echo(
+                f"  run={rid} rep={r.repetition_index} seed={r.seed}  "
+                f"{metric_fmt}  wall={r.wall_clock_seconds:.3f}s{art}"
+            )
         else:
             meta = r.project_metadata or {}
-            click.echo(f"  [rep {r.repetition_index} seed={r.seed}] ERROR  {meta}")
+            click.echo(
+                f"  run={rid} rep={r.repetition_index} seed={r.seed}  ERROR  {meta}"
+            )
 
 
 if __name__ == "__main__":

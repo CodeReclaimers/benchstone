@@ -6,6 +6,7 @@ import pytest
 
 from benchstone.gate import evaluate
 from benchstone.manifest import Benchmark
+from benchstone.references import Reference
 from benchstone.store import Baseline, Run
 
 
@@ -31,7 +32,12 @@ def _bench(**overrides: Any) -> Benchmark:
     return Benchmark(**base)
 
 
-def _run(metric: float | None, status: str = "ok", rep: int = 0) -> Run:
+def _run(
+    metric: float | None = None,
+    status: str = "ok",
+    rep: int = 0,
+    artifact_hash: str | None = None,
+) -> Run:
     return Run(
         id=0, project="P", benchmark="B", git_sha="sha",
         git_dirty=False, dirty_diff_path=None,
@@ -40,6 +46,8 @@ def _run(metric: float | None, status: str = "ok", rep: int = 0) -> Run:
         status=status, metric=metric, metric_components=None,
         wall_clock_seconds=0.0, project_metadata=None,
         stderr_log_path=None,
+        artifact_hash=artifact_hash,
+        artifact_path=None,
     )
 
 
@@ -118,13 +126,86 @@ def test_errored_runs_excluded_from_count() -> None:
     assert "candidate" in v.reason
 
 
-def test_correctness_tier_raises() -> None:
+def test_correctness_no_reference() -> None:
     bench = _bench(
         tier="correctness", deterministic=True, metric_direction=None,
         promotion_sigma=None, reference_policy="byte_equivalence",
     )
-    with pytest.raises(NotImplementedError):
-        evaluate(bench, _baseline(), [], [])
+    v = evaluate(bench, None, [], [_run(artifact_hash="sha256:aa")])
+    assert v.kind == "NO_REFERENCE"
+
+
+def test_correctness_needs_more_data() -> None:
+    bench = _bench(
+        tier="correctness", deterministic=True, metric_direction=None,
+        promotion_sigma=None, reference_policy="byte_equivalence",
+    )
+    ref = Reference(
+        project="P", benchmark="B", frozen_at="t",
+        frozen_git_sha="sha", content_hash="sha256:aa",
+        content_path="/tmp/ref.bin", from_run_id=1, notes=None,
+    )
+    v = evaluate(bench, None, [], [], reference=ref)
+    assert v.kind == "NEEDS_MORE_DATA"
+
+
+def test_correctness_pass_on_hash_match() -> None:
+    bench = _bench(
+        tier="correctness", deterministic=True, metric_direction=None,
+        promotion_sigma=None, reference_policy="byte_equivalence",
+    )
+    ref = Reference(
+        project="P", benchmark="B", frozen_at="t",
+        frozen_git_sha="sha", content_hash="sha256:abc",
+        content_path="/tmp/ref.bin", from_run_id=1, notes=None,
+    )
+    v = evaluate(
+        bench, None, [],
+        [_run(artifact_hash="sha256:abc", rep=0)],
+        reference=ref,
+    )
+    assert v.kind == "PASS"
+    assert v.reference_hash == "sha256:abc"
+    assert v.candidate_hash == "sha256:abc"
+
+
+def test_correctness_fail_on_hash_mismatch() -> None:
+    bench = _bench(
+        tier="correctness", deterministic=True, metric_direction=None,
+        promotion_sigma=None, reference_policy="byte_equivalence",
+    )
+    ref = Reference(
+        project="P", benchmark="B", frozen_at="t",
+        frozen_git_sha="sha", content_hash="sha256:abc",
+        content_path="/tmp/ref.bin", from_run_id=1, notes=None,
+    )
+    v = evaluate(
+        bench, None, [],
+        [_run(artifact_hash="sha256:xyz", rep=0)],
+        reference=ref,
+    )
+    assert v.kind == "FAIL"
+    assert v.candidate_hash == "sha256:xyz"
+
+
+def test_correctness_picks_latest_candidate() -> None:
+    """When multiple candidate runs are present, the most recent one decides the verdict."""
+    bench = _bench(
+        tier="correctness", deterministic=True, metric_direction=None,
+        promotion_sigma=None, reference_policy="byte_equivalence",
+    )
+    ref = Reference(
+        project="P", benchmark="B", frozen_at="t",
+        frozen_git_sha="sha", content_hash="sha256:abc",
+        content_path="/tmp/ref.bin", from_run_id=1, notes=None,
+    )
+    v = evaluate(
+        bench, None, [],
+        [_run(artifact_hash="sha256:old", rep=0),
+         _run(artifact_hash="sha256:abc", rep=1)],  # latest matches
+        reference=ref,
+    )
+    assert v.kind == "PASS"
 
 
 def test_deterministic_non_correctness_raises() -> None:

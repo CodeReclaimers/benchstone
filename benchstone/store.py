@@ -25,7 +25,9 @@ CREATE TABLE IF NOT EXISTS runs (
   metric_components_json TEXT,
   wall_clock_seconds REAL,
   project_metadata_json TEXT,
-  stderr_log_path TEXT
+  stderr_log_path TEXT,
+  artifact_hash TEXT,
+  artifact_path TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_runs_lookup ON runs(project, benchmark, git_sha);
@@ -40,6 +42,11 @@ CREATE TABLE IF NOT EXISTS baselines (
   PRIMARY KEY (project, benchmark)
 );
 """
+
+_MIGRATIONS: tuple[tuple[str, str], ...] = (
+    ("artifact_hash", "ALTER TABLE runs ADD COLUMN artifact_hash TEXT"),
+    ("artifact_path", "ALTER TABLE runs ADD COLUMN artifact_path TEXT"),
+)
 
 _RUN_COLUMNS: tuple[str, ...] = (
     "project", "benchmark", "git_sha", "git_dirty", "dirty_diff_path",
@@ -78,6 +85,8 @@ class Run:
     wall_clock_seconds: float | None
     project_metadata: dict[str, Any] | None
     stderr_log_path: str | None
+    artifact_hash: str | None = None
+    artifact_path: str | None = None
 
 
 class Store:
@@ -92,7 +101,14 @@ class Store:
         self._conn = sqlite3.connect(self.db_path)
         self._conn.row_factory = sqlite3.Row
         self._conn.executescript(SCHEMA)
+        self._apply_migrations()
         self._conn.commit()
+
+    def _apply_migrations(self) -> None:
+        existing = {row[1] for row in self._conn.execute("PRAGMA table_info(runs)").fetchall()}
+        for column_name, sql in _MIGRATIONS:
+            if column_name not in existing:
+                self._conn.execute(sql)
 
     def close(self) -> None:
         self._conn.close()
@@ -234,6 +250,8 @@ def _prepare_run_row(fields: dict[str, Any]) -> dict[str, Any]:
         "wall_clock_seconds": fields.get("wall_clock_seconds"),
         "project_metadata_json": jdump(fields.get("project_metadata")),
         "stderr_log_path": fields.get("stderr_log_path"),
+        "artifact_hash": fields.get("artifact_hash"),
+        "artifact_path": fields.get("artifact_path"),
     }
 
 
@@ -270,4 +288,6 @@ def _row_to_run(row: sqlite3.Row) -> Run:
         wall_clock_seconds=row["wall_clock_seconds"],
         project_metadata=jload(row["project_metadata_json"]),
         stderr_log_path=row["stderr_log_path"],
+        artifact_hash=row["artifact_hash"],
+        artifact_path=row["artifact_path"],
     )

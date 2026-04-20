@@ -299,6 +299,102 @@ def test_baseline_establish_background_sets_pointer_on_completion(
     assert base.notes == "bg-set"
 
 
+def test_correctness_freeze_then_evaluate_passes(
+    fake_project_git: Path, isolated_home: Path
+) -> None:
+    """End-to-end correctness flow: run → freeze-reference → re-run → evaluate → PASS."""
+    runner = CliRunner()
+    runner.invoke(main, ["register", str(fake_project_git)])
+
+    r = runner.invoke(main, ["run", "FakeProject", "fake_correctness",
+                             "--meta-seed", "1"])
+    assert r.exit_code == 0, r.output
+
+    r = runner.invoke(main, ["freeze-reference", "FakeProject", "fake_correctness",
+                             "--notes", "v1 reference"])
+    assert r.exit_code == 0, r.output
+    assert "frozen reference" in r.output
+    assert "content_hash=sha256:" in r.output
+
+    # Second run produces an identical artifact (fake_correctness is bytewise
+    # deterministic in its default configuration).
+    runner.invoke(main, ["run", "FakeProject", "fake_correctness",
+                         "--meta-seed", "2"])
+
+    r = runner.invoke(main, ["evaluate", "FakeProject", "fake_correctness"])
+    assert r.exit_code == 0, r.output
+    assert "PASS" in r.output
+    assert "tier:        correctness" in r.output
+
+
+def test_correctness_evaluate_fails_after_variant_shift(
+    fake_project_git: Path, isolated_home: Path, monkeypatch: "pytest.MonkeyPatch",
+) -> None:
+    """After freezing a v1 reference, a v2 run (via FAKE_CORRECTNESS_VARIANT)
+    produces a different artifact hash — the gate must return FAIL with exit 1."""
+    runner = CliRunner()
+    runner.invoke(main, ["register", str(fake_project_git)])
+
+    # Freeze the v1 reference.
+    runner.invoke(main, ["run", "FakeProject", "fake_correctness", "--meta-seed", "1"])
+    runner.invoke(main, ["freeze-reference", "FakeProject", "fake_correctness"])
+
+    # Run again under v2 so the artifact bytes diverge.
+    monkeypatch.setenv("FAKE_CORRECTNESS_VARIANT", "v2")
+    runner.invoke(main, ["run", "FakeProject", "fake_correctness", "--meta-seed", "2"])
+
+    r = runner.invoke(main, ["evaluate", "FakeProject", "fake_correctness"])
+    assert r.exit_code == 1, r.output
+    assert "FAIL" in r.output
+    assert "differs from reference" in r.output
+
+
+def test_evaluate_no_reference_exits_2(
+    fake_project_git: Path, isolated_home: Path
+) -> None:
+    runner = CliRunner()
+    runner.invoke(main, ["register", str(fake_project_git)])
+    runner.invoke(main, ["run", "FakeProject", "fake_correctness", "--meta-seed", "1"])
+    r = runner.invoke(main, ["evaluate", "FakeProject", "fake_correctness"])
+    assert r.exit_code == 2, r.output
+    assert "NO_REFERENCE" in r.output
+
+
+def test_freeze_reference_refuses_on_non_correctness(
+    fake_project_git: Path, isolated_home: Path
+) -> None:
+    runner = CliRunner()
+    runner.invoke(main, ["register", str(fake_project_git)])
+    r = runner.invoke(main, ["freeze-reference", "FakeProject", "fake_quality"])
+    assert r.exit_code != 0
+    assert "correctness-tier" in r.output
+
+
+def test_replace_reference_requires_reason_via_cli(
+    fake_project_git: Path, isolated_home: Path, monkeypatch: "pytest.MonkeyPatch",
+) -> None:
+    runner = CliRunner()
+    runner.invoke(main, ["register", str(fake_project_git)])
+    runner.invoke(main, ["run", "FakeProject", "fake_correctness", "--meta-seed", "1"])
+    runner.invoke(main, ["freeze-reference", "FakeProject", "fake_correctness"])
+
+    monkeypatch.setenv("FAKE_CORRECTNESS_VARIANT", "v2")
+    runner.invoke(main, ["run", "FakeProject", "fake_correctness", "--meta-seed", "2"])
+
+    # Missing --reason triggers click's required-option error before our checks.
+    r = runner.invoke(main, ["replace-reference", "FakeProject", "fake_correctness"])
+    assert r.exit_code != 0
+
+    r = runner.invoke(
+        main,
+        ["replace-reference", "FakeProject", "fake_correctness",
+         "--reason", "intentional behavior change"],
+    )
+    assert r.exit_code == 0, r.output
+    assert "replaced reference" in r.output
+    assert "intentional behavior change" in r.output
+
+
 def test_promote_force_moves_pointer(
     fake_project_git: Path, isolated_home: Path
 ) -> None:

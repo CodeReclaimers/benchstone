@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import os
 import sys
 import time
 from pathlib import Path
@@ -35,13 +36,22 @@ def fake_quality(cfg: dict) -> dict:
 
 
 def fake_correctness(cfg: dict) -> dict:
-    """Correctness benchmark: always returns the same bytes. Reserved for Phase 3."""
-    _ = cfg  # correctness ignores seed
+    """Correctness benchmark: writes a deterministic byte artifact to artifact_path.
+
+    An env var ``FAKE_CORRECTNESS_VARIANT`` can shift the content, which tests
+    use to simulate a code change that breaks byte-equivalence against a prior
+    frozen reference.
+    """
+    artifact_path = cfg.get("artifact_path")
+    variant = os.environ.get("FAKE_CORRECTNESS_VARIANT", "v1")
+    content = f"fake correctness artifact {variant}\n".encode("utf-8")
+    if artifact_path:
+        Path(artifact_path).write_bytes(content)
     return {
         "status": "ok",
         "metric": 0.0,
         "wall_clock_seconds": 0.001,
-        "metadata": {"reference_bytes_sha256": "placeholder"},
+        "metadata": {"artifact_bytes": len(content), "variant": variant},
     }
 
 

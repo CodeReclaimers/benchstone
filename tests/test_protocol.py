@@ -19,7 +19,18 @@ def test_invocation_config_roundtrip(tmp_path: Path) -> None:
     assert loaded == {
         "benchmark": "b", "seed": 42, "corpus_path": "/tmp/c",
         "repetition_index": 1, "repetition_total": 3,
+        "artifact_path": None,
     }
+
+
+def test_invocation_config_with_artifact_path(tmp_path: Path) -> None:
+    cfg = InvocationConfig(
+        benchmark="correctness", seed=0, corpus_path="",
+        repetition_index=0, repetition_total=1,
+        artifact_path="/tmp/out.bin",
+    )
+    loaded = json.loads(cfg.to_json())
+    assert loaded["artifact_path"] == "/tmp/out.bin"
 
 
 def test_project_result_ok() -> None:
