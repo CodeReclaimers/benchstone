@@ -1,0 +1,30 @@
+[project]
+name = "FakeProject"
+language = "python"
+invocation = "python bench/benchmarks.py --entry={entry_point} --config={config_path} --output={output_path}"
+
+[[benchmarks]]
+name = "fake_quality"
+entry_point = "fake_quality"
+tier = "quality"
+deterministic = false
+metric_direction = "minimize"
+expected_runtime_seconds = 2
+threads = 1
+gpu = "none"
+background_required = false
+repetitions = 3
+baseline_seeds = [1, 2, 3]
+promotion_sigma = 2.0
+corpus_path = "bench/corpus/fake"
+corpus_hash = "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+
+[[benchmarks]]
+name = "fake_correctness"
+entry_point = "fake_correctness"
+tier = "correctness"
+deterministic = true
+threads = 1
+gpu = "none"
+background_required = false
+reference_policy = "byte_equivalence"
