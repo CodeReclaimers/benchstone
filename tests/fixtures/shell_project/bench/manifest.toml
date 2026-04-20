@@ -1,0 +1,28 @@
+[project]
+name = "ShellProject"
+language = "bash"
+invocation = "bash bench/benchmarks.sh --entry={entry_point} --config={config_path} --output={output_path}"
+
+[[benchmarks]]
+name = "shell_quality"
+entry_point = "shell_quality"
+tier = "quality"
+deterministic = false
+metric_direction = "minimize"
+expected_runtime_seconds = 1
+threads = 1
+gpu = "none"
+background_required = false
+repetitions = 3
+baseline_seeds = [10, 20, 30]
+promotion_sigma = 2.0
+
+[[benchmarks]]
+name = "shell_correctness"
+entry_point = "shell_correctness"
+tier = "correctness"
+deterministic = true
+threads = 1
+gpu = "none"
+background_required = false
+reference_policy = "byte_equivalence"

@@ -250,6 +250,56 @@ def replace_reference_cmd(
     )
 
 
+@main.command("history")
+@click.argument("project_name")
+@click.argument("benchmark_name")
+@click.option("--since", default=None,
+              help="Only show runs whose timestamp is >= this ISO string "
+                   "(e.g. 2026-04-19 or 2026-04-19T14:22:11Z).")
+@click.option("--git-sha", default=None,
+              help="Filter to runs at a specific git SHA (prefix match).")
+@click.option("--limit", type=int, default=None,
+              help="Show only the most recent N runs after other filters are applied.")
+def history_cmd(
+    project_name: str,
+    benchmark_name: str,
+    since: str | None,
+    git_sha: str | None,
+    limit: int | None,
+) -> None:
+    """Print a timeline of runs for PROJECT_NAME/BENCHMARK_NAME."""
+    with Store(paths.store_path()) as store:
+        runs = store.fetch_runs(project_name, benchmark_name)
+    if git_sha is not None:
+        runs = [r for r in runs if r.git_sha.startswith(git_sha)]
+    if since is not None:
+        runs = [r for r in runs if r.timestamp >= since]
+    if limit is not None and limit >= 0:
+        runs = runs[-limit:]
+    if not runs:
+        click.echo("(no runs match)")
+        return
+
+    with Store(paths.store_path()) as store:
+        baseline_row = store.get_baseline(project_name, benchmark_name)
+    baseline_sha = baseline_row.git_sha if baseline_row is not None else None
+    if baseline_sha:
+        click.echo(f"# baseline @ {baseline_sha[:10]}")
+
+    for r in runs:
+        metric_str = f"metric={r.metric:.6f}" if r.metric is not None else "metric=-"
+        meta_tag = "baseline" if r.meta_seed is None else f"meta={r.meta_seed}"
+        artifact = f"  artifact={r.artifact_hash[:18]}..." if r.artifact_hash else ""
+        dirty = "  DIRTY" if r.git_dirty else ""
+        marker = "  *" if baseline_sha and r.git_sha == baseline_sha else "   "
+        click.echo(
+            f"{r.timestamp}{marker}run={r.id}  sha={r.git_sha[:10]}  "
+            f"seed={r.seed}  {meta_tag}  rep={r.repetition_index}  "
+            f"{r.status:<5}  {metric_str}  wall={r.wall_clock_seconds:.3f}s"
+            f"{artifact}{dirty}"
+        )
+
+
 @main.command("status")
 @click.option("--all", "show_all", is_flag=True, default=False,
               help="Include terminal (done/failed/stale) jobs as well as active ones.")

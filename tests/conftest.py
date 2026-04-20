@@ -26,14 +26,28 @@ def isolated_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
 
 @pytest.fixture
+def shell_project_path() -> Path:
+    return FIXTURES / "shell_project"
+
+
+@pytest.fixture
 def fake_project_git(tmp_path: Path, fake_project_path: Path) -> Path:
     """Copy the fake-project fixture into a tmp directory and make it a clean git repo.
 
     Returns the path to the committed working tree so provenance.git_state() can
     produce a concrete SHA and clean-tree verdict.
     """
-    dest = tmp_path / "FakeProjectRepo"
-    shutil.copytree(fake_project_path, dest)
+    return _materialize_git_project(tmp_path / "FakeProjectRepo", fake_project_path)
+
+
+@pytest.fixture
+def shell_project_git(tmp_path: Path, shell_project_path: Path) -> Path:
+    """Bash-based second-project fixture for Phase 4 contract stress."""
+    return _materialize_git_project(tmp_path / "ShellProjectRepo", shell_project_path)
+
+
+def _materialize_git_project(dest: Path, src: Path) -> Path:
+    shutil.copytree(src, dest)
     _git(dest, "init", "-q", "-b", "main")
     _git(dest, "config", "user.email", "test@example.com")
     _git(dest, "config", "user.name", "benchstone tests")
