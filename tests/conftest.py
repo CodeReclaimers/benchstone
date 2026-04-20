@@ -18,6 +18,10 @@ def fake_project_path() -> Path:
 def isolated_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     home = tmp_path / "benchstone-home"
     monkeypatch.setenv("BENCHSTONE_HOME", str(home))
+    # Give the scheduler enough headroom that every manifest benchmark admits
+    # by default; individual tests can override either variable.
+    monkeypatch.setenv("BENCHSTONE_MAX_THREADS", "64")
+    monkeypatch.setenv("BENCHSTONE_GPU_COUNT", "0")
     return home
 
 

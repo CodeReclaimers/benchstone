@@ -34,3 +34,7 @@ def references_dir() -> Path:
 
 def logs_dir() -> Path:
     return benchstone_home() / "logs"
+
+
+def jobs_dir() -> Path:
+    return benchstone_home() / "jobs"

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
 from click.testing import CliRunner
 
 from benchstone import paths as bs_paths
@@ -151,6 +152,151 @@ def test_promote_refuses_without_force_on_reject(
     r = runner.invoke(main, ["promote", "FakeProject", "fake_quality"])
     assert r.exit_code != 0
     assert "refusing to promote" in r.output
+
+
+def test_run_background_dispatches_job(
+    fake_project_git: Path, isolated_home: Path
+) -> None:
+    import time as _time
+
+    runner = CliRunner()
+    runner.invoke(main, ["register", str(fake_project_git)])
+
+    r = runner.invoke(
+        main,
+        ["run", "FakeProject", "fake_quality",
+         "--seed-set", "baseline", "--background"],
+    )
+    assert r.exit_code == 0, r.output
+    assert "dispatched background job" in r.output
+
+    # Poll until the spawned job reports a terminal status so we don't leave
+    # a detached child running against torn-down test state.
+    from benchstone import jobs as _jobs
+    deadline = _time.monotonic() + 10.0
+    job_list = _jobs.list_all()
+    assert len(job_list) == 1
+    job_id = job_list[0].job_id
+    while _time.monotonic() < deadline:
+        j = _jobs.load(job_id)
+        if j.status in _jobs.TERMINAL_STATUSES:
+            break
+        _time.sleep(0.05)
+    assert _jobs.load(job_id).status == "done"
+
+    with Store(bs_paths.store_path()) as store:
+        runs = store.fetch_runs("FakeProject", "fake_quality")
+        assert len(runs) == 3
+        assert all(r.status == "ok" for r in runs)
+
+
+def test_status_lists_jobs(fake_project_git: Path, isolated_home: Path) -> None:
+    import time as _time
+
+    runner = CliRunner()
+    runner.invoke(main, ["register", str(fake_project_git)])
+
+    # No jobs yet.
+    r = runner.invoke(main, ["status"])
+    assert r.exit_code == 0, r.output
+    assert "no active jobs" in r.output
+
+    runner.invoke(
+        main,
+        ["run", "FakeProject", "fake_quality",
+         "--seed-set", "baseline", "--background"],
+    )
+
+    # Poll for completion before asserting terminal-status output.
+    from benchstone import jobs as _jobs
+    deadline = _time.monotonic() + 10.0
+    while _time.monotonic() < deadline:
+        listed = _jobs.list_all()
+        if listed and listed[0].status in _jobs.TERMINAL_STATUSES:
+            break
+        _time.sleep(0.05)
+
+    r = runner.invoke(main, ["status", "--all"])
+    assert r.exit_code == 0, r.output
+    assert "FakeProject/fake_quality" in r.output
+    assert "done" in r.output
+
+
+def test_scheduler_refuses_overcommit(
+    fake_project_git: Path,
+    isolated_home: Path,
+    monkeypatch: "pytest.MonkeyPatch",
+) -> None:
+    monkeypatch.setenv("BENCHSTONE_MAX_THREADS", "2")
+    runner = CliRunner()
+    runner.invoke(main, ["register", str(fake_project_git)])
+
+    # fake_heavy declares threads=4; with MAX_THREADS=2 the scheduler must refuse.
+    r = runner.invoke(
+        main,
+        ["run", "FakeProject", "fake_heavy",
+         "--seed-set", "baseline", "--foreground"],
+    )
+    assert r.exit_code != 0
+    assert "thread" in r.output.lower() or "capacity" in r.output.lower()
+
+
+def test_background_required_auto_dispatches(
+    fake_project_git: Path, isolated_home: Path
+) -> None:
+    """fake_heavy has background_required=true in the manifest; the CLI should
+    default to background dispatch even without an explicit --background flag."""
+    import time as _time
+
+    runner = CliRunner()
+    runner.invoke(main, ["register", str(fake_project_git)])
+
+    r = runner.invoke(
+        main,
+        ["run", "FakeProject", "fake_heavy", "--seed-set", "baseline"],
+    )
+    assert r.exit_code == 0, r.output
+    assert "dispatched background job" in r.output
+
+    from benchstone import jobs as _jobs
+    deadline = _time.monotonic() + 10.0
+    while _time.monotonic() < deadline:
+        listed = _jobs.list_all()
+        if listed and listed[0].status in _jobs.TERMINAL_STATUSES:
+            break
+        _time.sleep(0.05)
+    assert _jobs.list_all()[0].status == "done"
+
+
+def test_baseline_establish_background_sets_pointer_on_completion(
+    fake_project_git: Path, isolated_home: Path
+) -> None:
+    import time as _time
+
+    runner = CliRunner()
+    runner.invoke(main, ["register", str(fake_project_git)])
+
+    r = runner.invoke(
+        main,
+        ["baseline", "establish", "FakeProject", "fake_quality",
+         "--background", "--notes", "bg-set"],
+    )
+    assert r.exit_code == 0, r.output
+    assert "dispatched background job" in r.output
+
+    from benchstone import jobs as _jobs
+    deadline = _time.monotonic() + 10.0
+    while _time.monotonic() < deadline:
+        listed = _jobs.list_all()
+        if listed and listed[0].status in _jobs.TERMINAL_STATUSES:
+            break
+        _time.sleep(0.05)
+    assert _jobs.list_all()[0].status == "done"
+
+    with Store(bs_paths.store_path()) as store:
+        base = store.get_baseline("FakeProject", "fake_quality")
+    assert base is not None
+    assert base.notes == "bg-set"
 
 
 def test_promote_force_moves_pointer(

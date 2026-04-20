@@ -6,10 +6,10 @@ from pathlib import Path
 
 import click
 
-from . import __version__, paths
+from . import __version__, background, jobs, paths
 from .gate import Verdict, evaluate as gate_evaluate
 from .manifest import Benchmark, ManifestError, Project, load as load_manifest
-from .provenance import ProvenanceError, git_state
+from .provenance import GitState, ProvenanceError, git_state
 from .registry import Registry, RegistryError
 from .runner import (
     RunPlan,
@@ -18,6 +18,7 @@ from .runner import (
     plan_baseline,
     plan_evaluation,
 )
+from .scheduler import HostCapacity, SchedulerError, admit
 from .store import Store
 
 
@@ -66,7 +67,7 @@ def list_cmd(project: str | None) -> None:
         for b in manifest.benchmarks:
             click.echo(
                 f"  - {b.name}  tier={b.tier}  reps={b.repetitions}  "
-                f"threads={b.threads}  gpu={b.gpu}"
+                f"threads={b.threads}  gpu={b.gpu}  bg_required={b.background_required}"
             )
 
 
@@ -83,12 +84,15 @@ def list_cmd(project: str | None) -> None:
               help="Override the meta-seed used to derive fresh seeds (reproducibility aid).")
 @click.option("--allow-dirty", is_flag=True, default=False,
               help="Allow execution against a dirty git tree (records a diff file).")
+@click.option("--background/--foreground", "background_flag", default=None,
+              help="Force background or foreground dispatch; default follows the manifest.")
 def run(
     project_name: str,
     benchmark_name: str,
     seed_set: str,
     meta_seed: int | None,
     allow_dirty: bool,
+    background_flag: bool | None,
 ) -> None:
     """Run BENCHMARK_NAME of PROJECT_NAME and append the result row(s) to the store."""
     project_path, project, benchmark = _resolve(project_name, benchmark_name)
@@ -98,20 +102,15 @@ def run(
     else:
         plan = plan_evaluation(benchmark, gstate, allow_dirty=allow_dirty, meta_seed=meta_seed)
 
-    with Store(paths.store_path()) as store:
-        try:
-            ids = runner_execute(
-                project=project,
-                project_path=project_path,
-                benchmark=benchmark,
-                plan=plan,
-                store=store,
-                host=socket.gethostname(),
-                logs_root=paths.logs_dir(),
-            )
-        except RunnerError as exc:
-            raise click.ClickException(str(exc))
-        _summarize_runs(store, ids, plan)
+    _dispatch(
+        project=project,
+        project_path=project_path,
+        benchmark=benchmark,
+        plan=plan,
+        background_flag=background_flag,
+        set_baseline=False,
+        baseline_notes=None,
+    )
 
 
 @main.group()
@@ -124,37 +123,28 @@ def baseline() -> None:
 @click.argument("benchmark_name")
 @click.option("--allow-dirty", is_flag=True, default=False)
 @click.option("--notes", default=None, help="Free-form note attached to the baseline.")
+@click.option("--background/--foreground", "background_flag", default=None,
+              help="Force background or foreground dispatch; default follows the manifest.")
 def baseline_establish(
     project_name: str,
     benchmark_name: str,
     allow_dirty: bool,
     notes: str | None,
+    background_flag: bool | None,
 ) -> None:
     """Run the baseline seed set and mark the current SHA as baseline."""
     project_path, project, benchmark = _resolve(project_name, benchmark_name)
     gstate = _require_git_state(project_path)
     plan = plan_baseline(benchmark, gstate, allow_dirty=allow_dirty)
 
-    with Store(paths.store_path()) as store:
-        try:
-            ids = runner_execute(
-                project=project,
-                project_path=project_path,
-                benchmark=benchmark,
-                plan=plan,
-                store=store,
-                host=socket.gethostname(),
-                logs_root=paths.logs_dir(),
-            )
-        except RunnerError as exc:
-            raise click.ClickException(str(exc))
-        _summarize_runs(store, ids, plan)
-
-        now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-        store.set_baseline(project.name, benchmark.name, gstate.sha, now, notes)
-    click.echo(
-        f"baseline set: {project.name}/{benchmark.name} -> {gstate.sha[:10]} "
-        f"({len(ids)} run(s))"
+    _dispatch(
+        project=project,
+        project_path=project_path,
+        benchmark=benchmark,
+        plan=plan,
+        background_flag=background_flag,
+        set_baseline=True,
+        baseline_notes=notes,
     )
 
 
@@ -194,6 +184,37 @@ def promote(
     click.echo(f"baseline promoted: {project.name}/{benchmark.name} -> {gstate.sha[:10]}")
 
 
+@main.command("status")
+@click.option("--all", "show_all", is_flag=True, default=False,
+              help="Include terminal (done/failed/stale) jobs as well as active ones.")
+def status_cmd(show_all: bool) -> None:
+    """List background jobs and their current state."""
+    all_jobs = jobs.refresh_staleness(jobs.list_all())
+    if not show_all:
+        all_jobs = [j for j in all_jobs if j.status in jobs.ACTIVE_STATUSES]
+    if not all_jobs:
+        click.echo("(no jobs)" if show_all else "(no active jobs)")
+        return
+    capacity = HostCapacity.from_env()
+    active = [j for j in all_jobs if j.status in jobs.ACTIVE_STATUSES]
+    threads_used = sum(j.threads for j in active)
+    gpu_used = sum(1 for j in active if j.gpu == "direct")
+    click.echo(
+        f"host capacity: threads={capacity.threads} gpu={capacity.gpu_count}  "
+        f"| in use: threads={threads_used} gpu_direct={gpu_used}"
+    )
+    for j in all_jobs:
+        run_summary = (
+            f" runs={len(j.inserted_run_ids)}" if j.inserted_run_ids else ""
+        )
+        msg = f"  msg={j.message}" if j.message else ""
+        click.echo(
+            f"  {j.job_id}  {j.status:<8}  {j.project}/{j.benchmark}"
+            f"  pid={j.pid}  threads={j.threads}  gpu={j.gpu}"
+            f"  started={j.started_at}{run_summary}{msg}"
+        )
+
+
 # --- helpers -----------------------------------------------------------------
 
 
@@ -216,11 +237,84 @@ def _resolve(project_name: str, benchmark_name: str) -> tuple[Path, Project, Ben
     return rp.path, manifest.project, bench
 
 
-def _require_git_state(project_path: Path):
+def _require_git_state(project_path: Path) -> GitState:
     try:
         return git_state(project_path)
     except ProvenanceError as exc:
         raise click.ClickException(f"git state: {exc}")
+
+
+def _dispatch(
+    *,
+    project: Project,
+    project_path: Path,
+    benchmark: Benchmark,
+    plan: RunPlan,
+    background_flag: bool | None,
+    set_baseline: bool,
+    baseline_notes: str | None,
+) -> None:
+    """Admission-check and dispatch a plan either foreground or background."""
+    use_background = _decide_background(benchmark, background_flag)
+    active_jobs = jobs.refresh_staleness(jobs.list_all())
+    active_jobs = [j for j in active_jobs if j.status in jobs.ACTIVE_STATUSES]
+    try:
+        admit(benchmark, active_jobs, HostCapacity.from_env())
+    except SchedulerError as exc:
+        raise click.ClickException(str(exc))
+
+    host = socket.gethostname()
+
+    if use_background:
+        job = background.spawn(
+            project=project,
+            project_path=project_path,
+            benchmark=benchmark,
+            plan=plan,
+            host=host,
+            set_baseline=set_baseline,
+            baseline_notes=baseline_notes,
+        )
+        click.echo(
+            f"dispatched background job {job.job_id}  pid={job.pid}  "
+            f"{project.name}/{benchmark.name}  "
+            f"git_sha={plan.git_state.sha[:10]}  dirty={plan.git_state.dirty}  "
+            f"meta_seed={plan.meta_seed}"
+        )
+        if set_baseline:
+            click.echo("  (baseline pointer will be updated when the job completes)")
+        return
+
+    with Store(paths.store_path()) as store:
+        try:
+            ids = runner_execute(
+                project=project,
+                project_path=project_path,
+                benchmark=benchmark,
+                plan=plan,
+                store=store,
+                host=host,
+                logs_root=paths.logs_dir(),
+            )
+        except RunnerError as exc:
+            raise click.ClickException(str(exc))
+        _summarize_runs(store, ids, plan)
+
+        if set_baseline:
+            now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+            store.set_baseline(
+                project.name, benchmark.name, plan.git_state.sha, now, baseline_notes
+            )
+            click.echo(
+                f"baseline set: {project.name}/{benchmark.name} -> "
+                f"{plan.git_state.sha[:10]} ({len(ids)} run(s))"
+            )
+
+
+def _decide_background(benchmark: Benchmark, flag: bool | None) -> bool:
+    if flag is not None:
+        return flag
+    return benchmark.background_required
 
 
 def _compute_verdict(

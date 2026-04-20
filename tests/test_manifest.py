@@ -20,7 +20,7 @@ def test_load_valid_manifest(fake_project_path: Path) -> None:
     assert m.project.language == "python"
     assert "{entry_point}" in m.project.invocation
     names = [b.name for b in m.benchmarks]
-    assert names == ["fake_quality", "fake_correctness"]
+    assert names == ["fake_quality", "fake_heavy", "fake_correctness"]
     assert m.content_hash.startswith("sha256:")
 
 
