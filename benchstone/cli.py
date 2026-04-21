@@ -21,6 +21,7 @@ from .runner import (
 )
 from .scheduler import HostCapacity, SchedulerError, admit
 from .store import Run, Store
+from .worktree import WorktreeError, with_git_worktree
 
 
 @click.group()
@@ -139,6 +140,10 @@ def baseline() -> None:
 @click.option("--repetitions", "-n", type=int, default=None,
               help="Override the baseline seed count for this invocation. "
                    "Must be <= len(baseline_seeds) in the manifest.")
+@click.option("--at-sha", "at_sha", default=None,
+              help="Establish the baseline at a past SHA via a temporary git "
+                   "worktree. Uses the manifest as it existed at that SHA. "
+                   "Forces foreground execution.")
 @click.option("--background/--foreground", "background_flag", default=None,
               help="Force background or foreground dispatch; default follows the manifest.")
 def baseline_establish(
@@ -147,27 +152,105 @@ def baseline_establish(
     allow_dirty: bool,
     notes: str | None,
     repetitions: int | None,
+    at_sha: str | None,
     background_flag: bool | None,
 ) -> None:
-    """Run the baseline seed set and mark the current SHA as baseline."""
-    project_path, project, benchmark = _resolve(project_name, benchmark_name)
-    gstate = _require_git_state(project_path)
-    try:
-        plan = plan_baseline(
-            benchmark, gstate, allow_dirty=allow_dirty, repetitions=repetitions,
-        )
-    except RunnerError as exc:
-        raise click.ClickException(str(exc))
+    """Run the baseline seed set and mark the current (or given) SHA as baseline."""
+    project_path, project, _ = _resolve(project_name, benchmark_name)
 
-    _dispatch(
+    if at_sha is None:
+        gstate = _require_git_state(project_path)
+        try:
+            benchmark = load_manifest(project_path).benchmark(benchmark_name)
+        except (ManifestError, KeyError) as exc:
+            raise click.ClickException(str(exc))
+        try:
+            plan = plan_baseline(
+                benchmark, gstate, allow_dirty=allow_dirty, repetitions=repetitions,
+            )
+        except RunnerError as exc:
+            raise click.ClickException(str(exc))
+
+        _dispatch(
+            project=project,
+            project_path=project_path,
+            benchmark=benchmark,
+            plan=plan,
+            background_flag=background_flag,
+            set_baseline=True,
+            baseline_notes=notes,
+        )
+        return
+
+    # --at-sha: run the benchmark inside a temporary worktree of that SHA,
+    # using that SHA's manifest. Background dispatch is incompatible (the
+    # worktree would have to outlive the parent CLI invocation), so force fg.
+    if background_flag is True:
+        raise click.ClickException("--at-sha is incompatible with --background")
+
+    _establish_at_sha(
         project=project,
         project_path=project_path,
-        benchmark=benchmark,
-        plan=plan,
-        background_flag=background_flag,
-        set_baseline=True,
-        baseline_notes=notes,
+        benchmark_name=benchmark_name,
+        at_sha=at_sha,
+        allow_dirty=allow_dirty,
+        repetitions=repetitions,
+        notes=notes,
     )
+
+
+def _establish_at_sha(
+    *,
+    project: Project,
+    project_path: Path,
+    benchmark_name: str,
+    at_sha: str,
+    allow_dirty: bool,
+    repetitions: int | None,
+    notes: str | None,
+) -> None:
+    try:
+        with with_git_worktree(project_path, at_sha) as wt_path:
+            try:
+                manifest_at_sha = load_manifest(wt_path)
+            except ManifestError as exc:
+                raise click.ClickException(
+                    f"manifest at {at_sha[:10]} is invalid: {exc}"
+                )
+            try:
+                benchmark = manifest_at_sha.benchmark(benchmark_name)
+            except KeyError:
+                raise click.ClickException(
+                    f"benchmark {benchmark_name!r} does not exist at {at_sha[:10]}"
+                )
+            gstate_at_sha = _require_git_state(wt_path)
+            try:
+                plan = plan_baseline(
+                    benchmark, gstate_at_sha,
+                    allow_dirty=allow_dirty, repetitions=repetitions,
+                )
+            except RunnerError as exc:
+                raise click.ClickException(str(exc))
+
+            click.echo(
+                f"establishing baseline in worktree at {gstate_at_sha.sha[:10]}"
+            )
+            _dispatch(
+                project=manifest_at_sha.project,
+                project_path=wt_path,
+                benchmark=benchmark,
+                plan=plan,
+                background_flag=False,
+                set_baseline=True,
+                baseline_notes=_annotate_notes(notes, at_sha),
+            )
+    except WorktreeError as exc:
+        raise click.ClickException(str(exc))
+
+
+def _annotate_notes(notes: str | None, at_sha: str) -> str:
+    tag = f"[established at {at_sha[:10]} via --at-sha]"
+    return f"{tag} {notes}" if notes else tag
 
 
 VALID_VERDICT_KINDS: frozenset[str] = frozenset({

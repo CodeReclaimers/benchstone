@@ -299,6 +299,78 @@ def test_baseline_establish_background_sets_pointer_on_completion(
     assert base.notes == "bg-set"
 
 
+def test_baseline_establish_at_sha(
+    fake_project_git: Path, isolated_home: Path
+) -> None:
+    """Establishing at a past SHA uses a worktree and points the baseline there."""
+    import subprocess
+
+    def _git(*args: str) -> str:
+        return subprocess.run(
+            ["git", "-C", str(fake_project_git), *args],
+            check=True, capture_output=True, text=True,
+        ).stdout.strip()
+
+    # Make a second commit so HEAD != HEAD^.
+    (fake_project_git / "CHANGE.txt").write_text("noop")
+    _git("add", "CHANGE.txt")
+    _git("-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "-m", "second")
+
+    head = _git("rev-parse", "HEAD")
+    parent = _git("rev-parse", "HEAD^")
+    assert head != parent
+
+    runner = CliRunner()
+    runner.invoke(main, ["register", str(fake_project_git)])
+
+    r = runner.invoke(
+        main,
+        ["baseline", "establish", "FakeProject", "fake_quality",
+         "--at-sha", parent, "--notes", "retro-baseline"],
+    )
+    assert r.exit_code == 0, r.output
+    assert "establishing baseline in worktree" in r.output
+    assert "baseline set" in r.output
+
+    with Store(bs_paths.store_path()) as store:
+        base = store.get_baseline("FakeProject", "fake_quality")
+        runs = store.fetch_baseline_runs(
+            "FakeProject", "fake_quality", parent
+        )
+    assert base is not None
+    assert base.git_sha == parent   # baseline points at the past SHA, not HEAD
+    assert "at-sha" in (base.notes or "")
+    assert len(runs) == 3
+    assert all(r.git_sha == parent for r in runs)
+
+
+def test_baseline_establish_at_sha_refuses_background(
+    fake_project_git: Path, isolated_home: Path
+) -> None:
+    runner = CliRunner()
+    runner.invoke(main, ["register", str(fake_project_git)])
+    r = runner.invoke(
+        main,
+        ["baseline", "establish", "FakeProject", "fake_quality",
+         "--at-sha", "HEAD", "--background"],
+    )
+    assert r.exit_code != 0
+    assert "--at-sha is incompatible with --background" in r.output
+
+
+def test_baseline_establish_at_sha_rejects_unknown_benchmark(
+    fake_project_git: Path, isolated_home: Path
+) -> None:
+    runner = CliRunner()
+    runner.invoke(main, ["register", str(fake_project_git)])
+    r = runner.invoke(
+        main,
+        ["baseline", "establish", "FakeProject", "no_such_benchmark",
+         "--at-sha", "HEAD"],
+    )
+    assert r.exit_code != 0
+
+
 def test_run_repetitions_override_shrinks_to_one(
     fake_project_git: Path, isolated_home: Path
 ) -> None:
