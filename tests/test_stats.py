@@ -4,7 +4,7 @@ import math
 
 import pytest
 
-from benchstone.stats import directed_sigma, mean_se
+from benchstone.stats import directed_sigma, mann_whitney_z, mean_se
 
 
 def test_mean_se_basic() -> None:
@@ -58,3 +58,73 @@ def test_directed_sigma_zero_variance_differing_means() -> None:
 def test_directed_sigma_rejects_bad_direction() -> None:
     with pytest.raises(ValueError, match="direction must be"):
         directed_sigma([1.0, 2.0], [1.0, 2.0], "sideways")
+
+
+# --- Mann-Whitney z ---
+
+
+def test_mann_whitney_clear_improvement_minimize() -> None:
+    baseline = [10.0, 11.0, 12.0, 13.0, 14.0]
+    candidate = [5.0, 6.0, 7.0, 8.0, 9.0]  # strictly smaller, so improvement
+    z = mann_whitney_z(baseline, candidate, "minimize")
+    assert z == pytest.approx(2.611, abs=0.01)
+
+
+def test_mann_whitney_clear_regression_minimize() -> None:
+    baseline = [5.0, 6.0, 7.0, 8.0, 9.0]
+    candidate = [10.0, 11.0, 12.0, 13.0, 14.0]  # strictly larger, regression
+    z = mann_whitney_z(baseline, candidate, "minimize")
+    assert z == pytest.approx(-2.611, abs=0.01)
+
+
+def test_mann_whitney_direction_flips_sign() -> None:
+    baseline = [10.0, 11.0, 12.0, 13.0, 14.0]
+    candidate = [5.0, 6.0, 7.0, 8.0, 9.0]
+    z_min = mann_whitney_z(baseline, candidate, "minimize")
+    z_max = mann_whitney_z(baseline, candidate, "maximize")
+    assert z_min == pytest.approx(-z_max)
+
+
+def test_mann_whitney_no_separation_near_zero() -> None:
+    # Symmetrically interleaved samples: half the candidates beat their
+    # paired baseline, half lose. Rank sums are close to equal -> |z| small.
+    baseline = [1.0, 3.0, 5.0, 7.0, 9.0]
+    candidate = [0.5, 3.5, 4.5, 8.0, 9.5]
+    z = mann_whitney_z(baseline, candidate, "minimize")
+    assert abs(z) < 0.2
+
+
+def test_mann_whitney_immune_to_outlier_magnitude() -> None:
+    """Changing a baseline value from 1.832 to 1e6 moves sigma but not z.
+
+    This is the Arborist pathology: parametric sigma inflates wildly with
+    outliers, while the rank-based statistic only cares that the outlier
+    is still the largest value.
+    """
+    baseline_mild = [1.248, 1.324, 1.254, 1.261, 1.832]
+    baseline_extreme = [1.248, 1.324, 1.254, 1.261, 1_000_000.0]
+    candidate = [1.10, 1.12, 1.14, 1.16, 1.18]
+    z_mild = mann_whitney_z(baseline_mild, candidate, "minimize")
+    z_extreme = mann_whitney_z(baseline_extreme, candidate, "minimize")
+    assert z_mild == pytest.approx(z_extreme)
+
+
+def test_mann_whitney_handles_ties() -> None:
+    """Ties use average ranks; a value appearing on both sides contributes
+    half its rank to each group."""
+    baseline = [1.0, 2.0, 3.0, 4.0, 5.0]
+    candidate = [1.0, 2.0, 3.0, 4.0, 5.0]  # identical sets
+    z = mann_whitney_z(baseline, candidate, "minimize")
+    assert z == pytest.approx(0.0)
+
+
+def test_mann_whitney_requires_two_samples_per_group() -> None:
+    with pytest.raises(ValueError, match="at least 2 samples"):
+        mann_whitney_z([1.0], [2.0, 3.0], "minimize")
+    with pytest.raises(ValueError, match="at least 2 samples"):
+        mann_whitney_z([1.0, 2.0], [3.0], "minimize")
+
+
+def test_mann_whitney_rejects_bad_direction() -> None:
+    with pytest.raises(ValueError, match="direction must be"):
+        mann_whitney_z([1.0, 2.0], [3.0, 4.0], "sideways")

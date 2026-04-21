@@ -548,6 +548,7 @@ def _print_verdict(
             click.echo(f"  candidate:   {v.candidate_hash}")
     else:
         click.echo(f"  direction:   {benchmark.metric_direction}")
+        click.echo(f"  gate_policy: {benchmark.gate_policy}")
         if v.sigma is not None:
             b_cv = _cv(v.baseline_mean, v.baseline_se)
             c_cv = _cv(v.candidate_mean, v.candidate_se)
@@ -559,14 +560,16 @@ def _print_verdict(
                 f"  candidate:   mean={v.candidate_mean:.6f}  se={v.candidate_se:.6f}  "
                 f"cv={c_cv:.4f}"
             )
+            stat_label = "z:" if benchmark.gate_policy == "mann_whitney" else "sigma:"
             click.echo(
-                f"  sigma:       {v.sigma:+.3f}  (threshold {v.threshold:.3f})"
+                f"  {stat_label:<12} {v.sigma:+.3f}  (threshold {v.threshold:.3f})"
             )
-            if b_cv > BASELINE_CV_WARN:
+            if b_cv > BASELINE_CV_WARN and benchmark.gate_policy == "sigma":
                 click.echo(
                     f"  warning:     baseline cv={b_cv:.4f} > {BASELINE_CV_WARN:.2f}; "
                     f"the promotion threshold may be dominated by outliers in the "
-                    f"baseline sample."
+                    f"baseline sample. Consider gate_policy = \"mann_whitney\" in "
+                    f"the manifest."
                 )
     click.echo(f"  verdict:     {v.kind}  {v.reason}")
 

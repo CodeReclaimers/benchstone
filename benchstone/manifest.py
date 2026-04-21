@@ -19,11 +19,12 @@ KNOWN_PROJECT_FIELDS: frozenset[str] = frozenset({"name", "language", "invocatio
 KNOWN_BENCHMARK_FIELDS: frozenset[str] = frozenset({
     "name", "entry_point", "tier", "deterministic", "metric_direction",
     "expected_runtime_seconds", "threads", "gpu", "background_required",
-    "repetitions", "baseline_seeds", "promotion_sigma",
+    "repetitions", "baseline_seeds", "promotion_sigma", "gate_policy",
     "corpus_path", "corpus_hash", "corpus_type", "reference_policy",
 })
 
 VALID_CORPUS_TYPES: frozenset[str] = frozenset({"bytes", "spec"})
+VALID_GATE_POLICIES: frozenset[str] = frozenset({"sigma", "mann_whitney"})
 KNOWN_TOP_LEVEL_KEYS: frozenset[str] = frozenset({"project", "benchmarks"})
 
 
@@ -56,6 +57,7 @@ class Benchmark:
     corpus_hash: str | None
     corpus_type: str | None
     reference_policy: str | None
+    gate_policy: str
 
 
 @dataclass(frozen=True)
@@ -193,6 +195,13 @@ def _parse_benchmark(entry: dict, idx: int) -> Benchmark:
         # manifests authored before corpus_type existed.
         corpus_type = "bytes"
 
+    gate_policy = entry.get("gate_policy", "sigma")
+    if gate_policy not in VALID_GATE_POLICIES:
+        raise ManifestError(
+            f"benchmarks[{idx}].gate_policy must be one of "
+            f"{sorted(VALID_GATE_POLICIES)}, got {gate_policy!r}"
+        )
+
     return Benchmark(
         name=str(entry["name"]),
         entry_point=str(entry["entry_point"]),
@@ -213,6 +222,7 @@ def _parse_benchmark(entry: dict, idx: int) -> Benchmark:
         corpus_hash=entry.get("corpus_hash"),
         corpus_type=corpus_type,
         reference_policy=entry.get("reference_policy"),
+        gate_policy=gate_policy,
     )
 
 

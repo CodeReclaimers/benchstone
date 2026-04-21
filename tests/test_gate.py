@@ -28,6 +28,7 @@ def _bench(**overrides: Any) -> Benchmark:
         corpus_hash=None,
         corpus_type=None,
         reference_policy=None,
+        gate_policy="sigma",
     )
     base.update(overrides)
     return Benchmark(**base)
@@ -207,6 +208,34 @@ def test_correctness_picks_latest_candidate() -> None:
         reference=ref,
     )
     assert v.kind == "PASS"
+
+
+def test_gate_policy_mann_whitney_promotes_cleanly_separated() -> None:
+    bench = _bench(gate_policy="mann_whitney")
+    baseline = [_run(10.0 + 0.1 * i, rep=i) for i in range(5)]
+    candidate = [_run(5.0 + 0.1 * i, rep=i) for i in range(5)]
+    v = evaluate(bench, _baseline(), baseline, candidate)
+    assert v.kind == "PROMOTE"
+    assert v.sigma is not None and v.sigma >= 2.0
+    assert "mann_whitney" in v.reason
+
+
+def test_gate_policy_mann_whitney_immune_to_outlier() -> None:
+    """Arborist pathology replayed: sigma REJECT, mann_whitney PROMOTE."""
+    bench_sigma = _bench(gate_policy="sigma", promotion_sigma=2.0)
+    bench_mw = _bench(gate_policy="mann_whitney", promotion_sigma=2.0)
+
+    baseline = [_run(m, rep=i) for i, m in enumerate([1.248, 1.324, 1.254, 1.261, 1.832])]
+    candidate = [_run(m, rep=i) for i, m in enumerate([1.20, 1.21, 1.22, 1.23, 1.24])]
+
+    v_sigma = evaluate(bench_sigma, _baseline(), baseline, candidate)
+    v_mw = evaluate(bench_mw, _baseline(), baseline, candidate)
+
+    # Parametric sigma: outlier inflates baseline SE, reject.
+    assert v_sigma.kind == "REJECT"
+    # Rank-based: every candidate value beats every non-outlier baseline
+    # value; promotion is clean.
+    assert v_mw.kind == "PROMOTE"
 
 
 def test_deterministic_non_correctness_raises() -> None:

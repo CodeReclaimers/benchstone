@@ -220,6 +220,49 @@ def test_corpus_type_none_when_no_hash(tmp_path: Path) -> None:
     assert m.benchmark("b").corpus_type is None
 
 
+def test_gate_policy_defaults_to_sigma(fake_project_path: Path) -> None:
+    m = load(fake_project_path)
+    assert m.benchmark("fake_quality").gate_policy == "sigma"
+
+
+def test_gate_policy_mann_whitney_parsed(tmp_path: Path) -> None:
+    path = _write(tmp_path, """
+        [project]
+        name = "p"
+        language = "python"
+        invocation = "true"
+
+        [[benchmarks]]
+        name = "b"
+        entry_point = "b"
+        tier = "quality"
+        metric_direction = "minimize"
+        promotion_sigma = 2.0
+        gate_policy = "mann_whitney"
+    """)
+    m = load(path)
+    assert m.benchmark("b").gate_policy == "mann_whitney"
+
+
+def test_gate_policy_invalid_raises(tmp_path: Path) -> None:
+    path = _write(tmp_path, """
+        [project]
+        name = "p"
+        language = "python"
+        invocation = "true"
+
+        [[benchmarks]]
+        name = "b"
+        entry_point = "b"
+        tier = "quality"
+        metric_direction = "minimize"
+        promotion_sigma = 2.0
+        gate_policy = "bayesian"
+    """)
+    with pytest.raises(ManifestError, match="gate_policy"):
+        load(path)
+
+
 def test_empty_benchmarks_list_raises(tmp_path: Path) -> None:
     path = _write(tmp_path, """
         [project]

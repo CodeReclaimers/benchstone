@@ -5,7 +5,7 @@ from dataclasses import dataclass
 
 from .manifest import Benchmark
 from .references import Reference
-from .stats import directed_sigma, mean_se
+from .stats import directed_sigma, mann_whitney_z, mean_se
 from .store import Baseline, Run
 
 VerdictKind = str
@@ -86,13 +86,20 @@ def evaluate(
     cmean, cse = mean_se(candidate_metrics)
     direction = benchmark.metric_direction
     assert direction is not None
-    sigma = directed_sigma(baseline_metrics, candidate_metrics, direction)
     threshold = benchmark.promotion_sigma
     assert threshold is not None
 
+    policy = benchmark.gate_policy
+    if policy == "mann_whitney":
+        sigma = mann_whitney_z(baseline_metrics, candidate_metrics, direction)
+        policy_tag = "mann_whitney z"
+    else:
+        sigma = directed_sigma(baseline_metrics, candidate_metrics, direction)
+        policy_tag = "sigma"
+
     kind = "PROMOTE" if sigma >= threshold else "REJECT"
     reason = (
-        f"sigma {sigma:+.3f} {'>=' if sigma >= threshold else '<'} "
+        f"{policy_tag} {sigma:+.3f} {'>=' if sigma >= threshold else '<'} "
         f"threshold {threshold:.3f} (direction={direction})"
     )
     return Verdict(
