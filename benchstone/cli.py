@@ -83,6 +83,9 @@ def list_cmd(project: str | None) -> None:
 )
 @click.option("--meta-seed", type=int, default=None,
               help="Override the meta-seed used to derive fresh seeds (reproducibility aid).")
+@click.option("--repetitions", "-n", type=int, default=None,
+              help="Override the manifest's repetition count for this invocation only. "
+                   "For --seed-set baseline, must be <= len(baseline_seeds).")
 @click.option("--allow-dirty", is_flag=True, default=False,
               help="Allow execution against a dirty git tree (records a diff file).")
 @click.option("--background/--foreground", "background_flag", default=None,
@@ -92,16 +95,25 @@ def run(
     benchmark_name: str,
     seed_set: str,
     meta_seed: int | None,
+    repetitions: int | None,
     allow_dirty: bool,
     background_flag: bool | None,
 ) -> None:
     """Run BENCHMARK_NAME of PROJECT_NAME and append the result row(s) to the store."""
     project_path, project, benchmark = _resolve(project_name, benchmark_name)
     gstate = _require_git_state(project_path)
-    if seed_set == "baseline":
-        plan = plan_baseline(benchmark, gstate, allow_dirty=allow_dirty)
-    else:
-        plan = plan_evaluation(benchmark, gstate, allow_dirty=allow_dirty, meta_seed=meta_seed)
+    try:
+        if seed_set == "baseline":
+            plan = plan_baseline(
+                benchmark, gstate, allow_dirty=allow_dirty, repetitions=repetitions,
+            )
+        else:
+            plan = plan_evaluation(
+                benchmark, gstate, allow_dirty=allow_dirty,
+                meta_seed=meta_seed, repetitions=repetitions,
+            )
+    except RunnerError as exc:
+        raise click.ClickException(str(exc))
 
     _dispatch(
         project=project,
@@ -124,6 +136,9 @@ def baseline() -> None:
 @click.argument("benchmark_name")
 @click.option("--allow-dirty", is_flag=True, default=False)
 @click.option("--notes", default=None, help="Free-form note attached to the baseline.")
+@click.option("--repetitions", "-n", type=int, default=None,
+              help="Override the baseline seed count for this invocation. "
+                   "Must be <= len(baseline_seeds) in the manifest.")
 @click.option("--background/--foreground", "background_flag", default=None,
               help="Force background or foreground dispatch; default follows the manifest.")
 def baseline_establish(
@@ -131,12 +146,18 @@ def baseline_establish(
     benchmark_name: str,
     allow_dirty: bool,
     notes: str | None,
+    repetitions: int | None,
     background_flag: bool | None,
 ) -> None:
     """Run the baseline seed set and mark the current SHA as baseline."""
     project_path, project, benchmark = _resolve(project_name, benchmark_name)
     gstate = _require_git_state(project_path)
-    plan = plan_baseline(benchmark, gstate, allow_dirty=allow_dirty)
+    try:
+        plan = plan_baseline(
+            benchmark, gstate, allow_dirty=allow_dirty, repetitions=repetitions,
+        )
+    except RunnerError as exc:
+        raise click.ClickException(str(exc))
 
     _dispatch(
         project=project,
@@ -149,15 +170,36 @@ def baseline_establish(
     )
 
 
+VALID_VERDICT_KINDS: frozenset[str] = frozenset({
+    "PROMOTE", "REJECT", "NEEDS_MORE_DATA", "NO_BASELINE",
+    "PASS", "FAIL", "NO_REFERENCE",
+})
+
+
 @main.command()
 @click.argument("project_name")
 @click.argument("benchmark_name")
-def evaluate(project_name: str, benchmark_name: str) -> None:
+@click.option("--expect", "expect", default=None,
+              help="Assert the verdict has this kind. Exit 0 on match, 4 on mismatch. "
+                   "Intended for validation scripts (e.g. whitespace-commit smoke tests).")
+def evaluate(
+    project_name: str, benchmark_name: str, expect: str | None
+) -> None:
     """Compare runs at the current SHA against the recorded baseline. Read-only."""
     project_path, project, benchmark = _resolve(project_name, benchmark_name)
     gstate = _require_git_state(project_path)
+    if expect is not None and expect not in VALID_VERDICT_KINDS:
+        raise click.ClickException(
+            f"--expect must be one of {sorted(VALID_VERDICT_KINDS)}, got {expect!r}"
+        )
     verdict = _compute_verdict(project, benchmark, project_path, gstate.sha)
     _print_verdict(project, benchmark, gstate.sha, verdict)
+    if expect is not None:
+        if verdict.kind == expect:
+            click.echo(f"  expected:    {expect}  (match)")
+            raise SystemExit(0)
+        click.echo(f"  expected:    {expect}  (MISMATCH — got {verdict.kind})")
+        raise SystemExit(4)
     raise SystemExit(_verdict_exit_code(verdict))
 
 
@@ -490,6 +532,9 @@ def _compute_verdict(
         return gate_evaluate(benchmark, baseline_row, baseline_runs, candidate_runs)
 
 
+BASELINE_CV_WARN = 0.05  # SE/|mean| above this triggers a fragility hint.
+
+
 def _print_verdict(
     project: Project, benchmark: Benchmark, current_sha: str, v: Verdict
 ) -> None:
@@ -504,16 +549,32 @@ def _print_verdict(
     else:
         click.echo(f"  direction:   {benchmark.metric_direction}")
         if v.sigma is not None:
+            b_cv = _cv(v.baseline_mean, v.baseline_se)
+            c_cv = _cv(v.candidate_mean, v.candidate_se)
             click.echo(
-                f"  baseline:    mean={v.baseline_mean:.6f}  se={v.baseline_se:.6f}"
+                f"  baseline:    mean={v.baseline_mean:.6f}  se={v.baseline_se:.6f}  "
+                f"cv={b_cv:.4f}"
             )
             click.echo(
-                f"  candidate:   mean={v.candidate_mean:.6f}  se={v.candidate_se:.6f}"
+                f"  candidate:   mean={v.candidate_mean:.6f}  se={v.candidate_se:.6f}  "
+                f"cv={c_cv:.4f}"
             )
             click.echo(
                 f"  sigma:       {v.sigma:+.3f}  (threshold {v.threshold:.3f})"
             )
+            if b_cv > BASELINE_CV_WARN:
+                click.echo(
+                    f"  warning:     baseline cv={b_cv:.4f} > {BASELINE_CV_WARN:.2f}; "
+                    f"the promotion threshold may be dominated by outliers in the "
+                    f"baseline sample."
+                )
     click.echo(f"  verdict:     {v.kind}  {v.reason}")
+
+
+def _cv(mean: float | None, se: float | None) -> float:
+    if mean is None or se is None or mean == 0:
+        return 0.0
+    return abs(se / mean)
 
 
 def _verdict_exit_code(v: Verdict) -> int:

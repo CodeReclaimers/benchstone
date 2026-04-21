@@ -42,6 +42,37 @@ def test_plan_evaluation_derives_stable_seeds(fake_project_git: Path) -> None:
     assert p3.seeds != p1.seeds
 
 
+def test_plan_baseline_honors_repetitions_override(fake_project_git: Path) -> None:
+    manifest = load_manifest(fake_project_git)
+    b = manifest.benchmark("fake_quality")  # baseline_seeds=[1,2,3]
+    gstate = git_state(fake_project_git)
+    plan = plan_baseline(b, gstate, allow_dirty=False, repetitions=1)
+    assert plan.seeds == (1,)
+
+
+def test_plan_baseline_rejects_repetitions_gt_seed_count(
+    fake_project_git: Path,
+) -> None:
+    from benchstone.runner import RunnerError
+
+    manifest = load_manifest(fake_project_git)
+    b = manifest.benchmark("fake_quality")  # baseline_seeds=[1,2,3]
+    with pytest.raises(RunnerError, match="exceeds baseline_seeds length"):
+        plan_baseline(b, git_state(fake_project_git), allow_dirty=False, repetitions=5)
+
+
+def test_plan_evaluation_honors_repetitions_override(
+    fake_project_git: Path,
+) -> None:
+    manifest = load_manifest(fake_project_git)
+    b = manifest.benchmark("fake_quality")  # manifest says repetitions=3
+    plan = plan_evaluation(
+        b, git_state(fake_project_git), allow_dirty=False,
+        meta_seed=42, repetitions=1,
+    )
+    assert len(plan.seeds) == 1
+
+
 def test_execute_baseline_against_fake_project(
     fake_project_git: Path, tmp_path: Path
 ) -> None:

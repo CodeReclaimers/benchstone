@@ -299,6 +299,168 @@ def test_baseline_establish_background_sets_pointer_on_completion(
     assert base.notes == "bg-set"
 
 
+def test_run_repetitions_override_shrinks_to_one(
+    fake_project_git: Path, isolated_home: Path
+) -> None:
+    """Smoke-test path: --repetitions 1 with --seed-set baseline uses the first seed only."""
+    runner = CliRunner()
+    runner.invoke(main, ["register", str(fake_project_git)])
+    r = runner.invoke(
+        main,
+        ["run", "FakeProject", "fake_quality",
+         "--seed-set", "baseline", "--repetitions", "1"],
+    )
+    assert r.exit_code == 0, r.output
+    assert "dispatched 1 run(s)" in r.output
+
+    with Store(bs_paths.store_path()) as store:
+        runs = store.fetch_runs("FakeProject", "fake_quality")
+    assert len(runs) == 1
+    assert runs[0].seed == 1  # baseline_seeds[0]
+
+
+def test_run_repetitions_rejects_excessive_baseline(
+    fake_project_git: Path, isolated_home: Path
+) -> None:
+    runner = CliRunner()
+    runner.invoke(main, ["register", str(fake_project_git)])
+    r = runner.invoke(
+        main,
+        ["run", "FakeProject", "fake_quality",
+         "--seed-set", "baseline", "--repetitions", "5"],
+    )
+    assert r.exit_code != 0
+    assert "exceeds baseline_seeds length" in r.output
+
+
+def test_run_repetitions_fresh_scales_freely(
+    fake_project_git: Path, isolated_home: Path
+) -> None:
+    runner = CliRunner()
+    runner.invoke(main, ["register", str(fake_project_git)])
+    # Fresh seeds come from the meta-seed PRNG; any count goes.
+    r = runner.invoke(
+        main,
+        ["run", "FakeProject", "fake_quality",
+         "--seed-set", "fresh", "--meta-seed", "7", "--repetitions", "8"],
+    )
+    assert r.exit_code == 0, r.output
+    assert "dispatched 8 run(s)" in r.output
+
+
+def test_baseline_establish_with_repetitions_override(
+    fake_project_git: Path, isolated_home: Path
+) -> None:
+    runner = CliRunner()
+    runner.invoke(main, ["register", str(fake_project_git)])
+    r = runner.invoke(
+        main,
+        ["baseline", "establish", "FakeProject", "fake_quality",
+         "--repetitions", "2"],
+    )
+    assert r.exit_code == 0, r.output
+    with Store(bs_paths.store_path()) as store:
+        baseline_runs = store.fetch_baseline_runs(
+            "FakeProject", "fake_quality", store.get_baseline(
+                "FakeProject", "fake_quality"
+            ).git_sha,
+        )
+    assert len(baseline_runs) == 2
+    assert [r.seed for r in baseline_runs] == [1, 2]
+
+
+def test_evaluate_expect_match_exits_zero(
+    fake_project_git: Path, isolated_home: Path
+) -> None:
+    runner = CliRunner()
+    runner.invoke(main, ["register", str(fake_project_git)])
+    runner.invoke(main, ["baseline", "establish", "FakeProject", "fake_quality"])
+    runner.invoke(
+        main,
+        ["run", "FakeProject", "fake_quality",
+         "--seed-set", "fresh", "--meta-seed", "42"],
+    )
+    # Known REJECT case from earlier tests.
+    r = runner.invoke(
+        main,
+        ["evaluate", "FakeProject", "fake_quality", "--expect", "REJECT"],
+    )
+    assert r.exit_code == 0, r.output
+    assert "expected:    REJECT  (match)" in r.output
+
+
+def test_evaluate_expect_mismatch_exits_four(
+    fake_project_git: Path, isolated_home: Path
+) -> None:
+    runner = CliRunner()
+    runner.invoke(main, ["register", str(fake_project_git)])
+    runner.invoke(main, ["baseline", "establish", "FakeProject", "fake_quality"])
+    runner.invoke(
+        main,
+        ["run", "FakeProject", "fake_quality",
+         "--seed-set", "fresh", "--meta-seed", "42"],
+    )
+    r = runner.invoke(
+        main,
+        ["evaluate", "FakeProject", "fake_quality", "--expect", "PROMOTE"],
+    )
+    assert r.exit_code == 4, r.output
+    assert "MISMATCH" in r.output
+
+
+def test_evaluate_expect_rejects_invalid_kind(
+    fake_project_git: Path, isolated_home: Path
+) -> None:
+    runner = CliRunner()
+    runner.invoke(main, ["register", str(fake_project_git)])
+    r = runner.invoke(
+        main,
+        ["evaluate", "FakeProject", "fake_quality", "--expect", "nope"],
+    )
+    assert r.exit_code != 0
+    assert "--expect" in r.output
+
+
+def test_evaluate_baseline_cv_warning(
+    fake_project_git: Path, isolated_home: Path
+) -> None:
+    """Synthesize a baseline with high CV by inserting hand-crafted rows."""
+    import socket
+    from datetime import datetime, timezone
+
+    runner = CliRunner()
+    runner.invoke(main, ["register", str(fake_project_git)])
+
+    from benchstone.provenance import git_state as _gs
+    sha = _gs(fake_project_git).sha
+
+    def _row(seed: int, metric: float, meta_seed: int | None) -> dict:
+        return dict(
+            project="FakeProject", benchmark="fake_quality",
+            git_sha=sha, git_dirty=False,
+            timestamp=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            harness_version="0.1.0", host=socket.gethostname(),
+            seed=seed, meta_seed=meta_seed, repetition_index=0,
+            status="ok", metric=metric, wall_clock_seconds=0.001,
+        )
+
+    with Store(bs_paths.store_path()) as store:
+        # Baseline set with a strong outlier (mirrors the Arborist pathology).
+        for seed, metric in [(1, 1.25), (2, 1.26), (3, 1.27), (4, 1.83), (5, 1.28)]:
+            store.insert_run(**_row(seed, metric, None))
+        # Candidate set — similar center, no outlier.
+        for seed, metric in [(100, 1.24), (101, 1.25), (102, 1.26), (103, 1.27), (104, 1.28)]:
+            store.insert_run(**_row(seed, metric, 42))
+        store.set_baseline(
+            "FakeProject", "fake_quality", sha,
+            "2026-04-20T00:00:00Z", notes="synthetic",
+        )
+
+    r = runner.invoke(main, ["evaluate", "FakeProject", "fake_quality"])
+    assert "cv=" in r.output
+    assert "baseline cv=" in r.output and "> 0.05" in r.output
+
+
 def test_correctness_freeze_then_evaluate_passes(
     fake_project_git: Path, isolated_home: Path
 ) -> None:

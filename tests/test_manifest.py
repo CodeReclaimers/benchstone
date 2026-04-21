@@ -144,6 +144,82 @@ def test_unknown_field_warns(tmp_path: Path) -> None:
         load(path)
 
 
+def test_corpus_type_defaults_to_bytes_when_hash_present(tmp_path: Path) -> None:
+    path = _write(tmp_path, """
+        [project]
+        name = "p"
+        language = "python"
+        invocation = "true"
+
+        [[benchmarks]]
+        name = "b"
+        entry_point = "b"
+        tier = "quality"
+        metric_direction = "minimize"
+        promotion_sigma = 2.0
+        corpus_path = "bench/corpus/x"
+        corpus_hash = "sha256:deadbeef"
+    """)
+    m = load(path)
+    assert m.benchmark("b").corpus_type == "bytes"
+
+
+def test_corpus_type_spec_parsed(tmp_path: Path) -> None:
+    path = _write(tmp_path, """
+        [project]
+        name = "p"
+        language = "python"
+        invocation = "true"
+
+        [[benchmarks]]
+        name = "b"
+        entry_point = "b"
+        tier = "quality"
+        metric_direction = "minimize"
+        promotion_sigma = 2.0
+        corpus_path = "bench/corpus/spec.toml"
+        corpus_hash = "sha256:deadbeef"
+        corpus_type = "spec"
+    """)
+    m = load(path)
+    assert m.benchmark("b").corpus_type == "spec"
+
+
+def test_corpus_type_invalid_raises(tmp_path: Path) -> None:
+    path = _write(tmp_path, """
+        [project]
+        name = "p"
+        language = "python"
+        invocation = "true"
+
+        [[benchmarks]]
+        name = "b"
+        entry_point = "b"
+        tier = "quality"
+        metric_direction = "minimize"
+        promotion_sigma = 2.0
+        corpus_type = "generated"
+    """)
+    with pytest.raises(ManifestError, match="corpus_type"):
+        load(path)
+
+
+def test_corpus_type_none_when_no_hash(tmp_path: Path) -> None:
+    path = _write(tmp_path, """
+        [project]
+        name = "p"
+        language = "python"
+        invocation = "true"
+
+        [[benchmarks]]
+        name = "b"
+        entry_point = "b"
+        tier = "correctness"
+    """)
+    m = load(path)
+    assert m.benchmark("b").corpus_type is None
+
+
 def test_empty_benchmarks_list_raises(tmp_path: Path) -> None:
     path = _write(tmp_path, """
         [project]

@@ -20,8 +20,10 @@ KNOWN_BENCHMARK_FIELDS: frozenset[str] = frozenset({
     "name", "entry_point", "tier", "deterministic", "metric_direction",
     "expected_runtime_seconds", "threads", "gpu", "background_required",
     "repetitions", "baseline_seeds", "promotion_sigma",
-    "corpus_path", "corpus_hash", "reference_policy",
+    "corpus_path", "corpus_hash", "corpus_type", "reference_policy",
 })
+
+VALID_CORPUS_TYPES: frozenset[str] = frozenset({"bytes", "spec"})
 KNOWN_TOP_LEVEL_KEYS: frozenset[str] = frozenset({"project", "benchmarks"})
 
 
@@ -52,6 +54,7 @@ class Benchmark:
     promotion_sigma: float | None
     corpus_path: str | None
     corpus_hash: str | None
+    corpus_type: str | None
     reference_policy: str | None
 
 
@@ -179,6 +182,17 @@ def _parse_benchmark(entry: dict, idx: int) -> Benchmark:
     deterministic_default = is_correctness
     deterministic = bool(entry.get("deterministic", deterministic_default))
 
+    corpus_type = entry.get("corpus_type")
+    if corpus_type is not None and corpus_type not in VALID_CORPUS_TYPES:
+        raise ManifestError(
+            f"benchmarks[{idx}].corpus_type must be one of "
+            f"{sorted(VALID_CORPUS_TYPES)}, got {corpus_type!r}"
+        )
+    if corpus_type is None and entry.get("corpus_hash"):
+        # Default to 'bytes' when a hash is present — back-compat for
+        # manifests authored before corpus_type existed.
+        corpus_type = "bytes"
+
     return Benchmark(
         name=str(entry["name"]),
         entry_point=str(entry["entry_point"]),
@@ -197,6 +211,7 @@ def _parse_benchmark(entry: dict, idx: int) -> Benchmark:
         promotion_sigma=float(promotion_sigma) if promotion_sigma is not None else None,
         corpus_path=entry.get("corpus_path"),
         corpus_hash=entry.get("corpus_hash"),
+        corpus_type=corpus_type,
         reference_policy=entry.get("reference_policy"),
     )
 

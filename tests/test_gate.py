@@ -26,6 +26,7 @@ def _bench(**overrides: Any) -> Benchmark:
         promotion_sigma=2.0,
         corpus_path=None,
         corpus_hash=None,
+        corpus_type=None,
         reference_policy=None,
     )
     base.update(overrides)

@@ -36,13 +36,28 @@ class RunPlan:
     allow_dirty: bool = False
 
 
-def plan_baseline(benchmark: Benchmark, git_state: GitState, allow_dirty: bool) -> RunPlan:
+def plan_baseline(
+    benchmark: Benchmark,
+    git_state: GitState,
+    allow_dirty: bool,
+    repetitions: int | None = None,
+) -> RunPlan:
     if not benchmark.baseline_seeds:
         raise RunnerError(
             f"benchmark {benchmark.name!r} has no baseline_seeds in the manifest"
         )
+    seeds: tuple[int, ...] = tuple(benchmark.baseline_seeds)
+    if repetitions is not None:
+        if repetitions < 1:
+            raise RunnerError("--repetitions must be >= 1")
+        if repetitions > len(seeds):
+            raise RunnerError(
+                f"--repetitions={repetitions} exceeds baseline_seeds length "
+                f"({len(seeds)}); extend baseline_seeds in the manifest or lower --repetitions"
+            )
+        seeds = seeds[:repetitions]
     return RunPlan(
-        seeds=tuple(benchmark.baseline_seeds),
+        seeds=seeds,
         meta_seed=None,
         git_state=git_state,
         allow_dirty=allow_dirty,
@@ -54,11 +69,15 @@ def plan_evaluation(
     git_state: GitState,
     allow_dirty: bool,
     meta_seed: int | None = None,
+    repetitions: int | None = None,
 ) -> RunPlan:
+    n = repetitions if repetitions is not None else benchmark.repetitions
+    if n < 1:
+        raise RunnerError("--repetitions must be >= 1")
     if meta_seed is None:
         meta_seed = int.from_bytes(os.urandom(8), "big") & 0x7FFFFFFFFFFFFFFF
     rng = random.Random(meta_seed)
-    seeds = tuple(rng.randrange(0, 2**31) for _ in range(benchmark.repetitions))
+    seeds = tuple(rng.randrange(0, 2**31) for _ in range(n))
     return RunPlan(
         seeds=seeds,
         meta_seed=meta_seed,
