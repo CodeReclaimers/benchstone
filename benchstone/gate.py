@@ -5,17 +5,34 @@ from dataclasses import dataclass
 
 from .manifest import Benchmark
 from .references import Reference
-from .stats import directed_sigma, mann_whitney_z, mean_se
+from .stats import directed_z, mann_whitney_z, mean_se
 from .store import Baseline, Run
 
 VerdictKind = str
 # Stochastic tiers: "PROMOTE" | "REJECT" | "NEEDS_MORE_DATA" | "NO_BASELINE"
 # Correctness tier: "PASS"    | "FAIL"   | "NEEDS_MORE_DATA" | "NO_REFERENCE"
 
+STOCHASTIC_KINDS: frozenset[str] = frozenset(
+    {"PROMOTE", "REJECT", "NEEDS_MORE_DATA", "NO_BASELINE"}
+)
+CORRECTNESS_KINDS: frozenset[str] = frozenset(
+    {"PASS", "FAIL", "NEEDS_MORE_DATA", "NO_REFERENCE"}
+)
+ALL_VERDICT_KINDS: frozenset[str] = STOCHASTIC_KINDS | CORRECTNESS_KINDS
+
+
+VerdictCategory = str  # "stochastic" | "correctness"
+
 
 @dataclass(frozen=True)
 class Verdict:
     kind: VerdictKind
+    # Dispatch key for formatters: "stochastic" verdicts carry
+    # sigma/threshold/mean/se fields; "correctness" verdicts carry
+    # reference_hash/candidate_hash. Keyed off the Verdict itself rather than
+    # the benchmark tier so downstream consumers don't need to re-derive which
+    # fields are populated.
+    category: VerdictCategory = "stochastic"
     sigma: float | None = None
     threshold: float | None = None
     baseline_mean: float | None = None
@@ -53,7 +70,11 @@ def evaluate(
             "deterministic non-correctness benchmarks are not yet supported by the gate"
         )
     if baseline is None:
-        return Verdict(kind="NO_BASELINE", reason="no baseline has been established")
+        return Verdict(
+            kind="NO_BASELINE",
+            category="stochastic",
+            reason="no baseline has been established",
+        )
 
     baseline_metrics = [
         r.metric for r in baseline_runs if r.status == "ok" and r.metric is not None
@@ -68,6 +89,7 @@ def evaluate(
     if len(baseline_metrics) < required_baseline:
         return Verdict(
             kind="NEEDS_MORE_DATA",
+            category="stochastic",
             reason=(
                 f"baseline has {len(baseline_metrics)} ok run(s) at "
                 f"{baseline.git_sha[:10]}, need {required_baseline}"
@@ -76,6 +98,7 @@ def evaluate(
     if len(candidate_metrics) < required_candidate:
         return Verdict(
             kind="NEEDS_MORE_DATA",
+            category="stochastic",
             reason=(
                 f"candidate has {len(candidate_metrics)} ok run(s), "
                 f"need {required_candidate}"
@@ -86,25 +109,31 @@ def evaluate(
     cmean, cse = mean_se(candidate_metrics)
     direction = benchmark.metric_direction
     assert direction is not None
-    threshold = benchmark.promotion_sigma
-    assert threshold is not None
 
     policy = benchmark.gate_policy
     if policy == "mann_whitney":
-        sigma = mann_whitney_z(baseline_metrics, candidate_metrics, direction)
+        statistic = mann_whitney_z(baseline_metrics, candidate_metrics, direction)
         policy_tag = "mann_whitney z"
+        threshold = (
+            benchmark.promotion_z
+            if benchmark.promotion_z is not None
+            else benchmark.promotion_sigma
+        )
     else:
-        sigma = directed_sigma(baseline_metrics, candidate_metrics, direction)
+        statistic = directed_z(baseline_metrics, candidate_metrics, direction)
         policy_tag = "sigma"
+        threshold = benchmark.promotion_sigma
+    assert threshold is not None
 
-    kind = "PROMOTE" if sigma >= threshold else "REJECT"
+    kind = "PROMOTE" if statistic >= threshold else "REJECT"
     reason = (
-        f"{policy_tag} {sigma:+.3f} {'>=' if sigma >= threshold else '<'} "
+        f"{policy_tag} {statistic:+.3f} {'>=' if statistic >= threshold else '<'} "
         f"threshold {threshold:.3f} (direction={direction})"
     )
     return Verdict(
         kind=kind,
-        sigma=sigma,
+        category="stochastic",
+        sigma=statistic,
         threshold=threshold,
         baseline_mean=bmean,
         baseline_se=bse,
@@ -122,6 +151,7 @@ def _correctness_verdict(
     if reference is None:
         return Verdict(
             kind="NO_REFERENCE",
+            category="correctness",
             reason=f"no frozen reference for {benchmark.name}",
         )
     candidates_with_artifact = [
@@ -131,6 +161,7 @@ def _correctness_verdict(
     if not candidates_with_artifact:
         return Verdict(
             kind="NEEDS_MORE_DATA",
+            category="correctness",
             reason=(
                 f"no ok candidate run with an artifact at the current SHA; "
                 f"run `bench run {benchmark.name}` first"
@@ -140,12 +171,14 @@ def _correctness_verdict(
     if latest.artifact_hash == reference.content_hash:
         return Verdict(
             kind="PASS",
+            category="correctness",
             reference_hash=reference.content_hash,
             candidate_hash=latest.artifact_hash,
             reason=f"artifact matches reference ({reference.content_hash[:18]}...)",
         )
     return Verdict(
         kind="FAIL",
+        category="correctness",
         reference_hash=reference.content_hash,
         candidate_hash=latest.artifact_hash,
         reason=(

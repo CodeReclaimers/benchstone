@@ -106,7 +106,7 @@ def test_worker_marks_job_failed_on_missing_manifest(
         "benchmark_name": "Y",
         "plan": {
             "seeds": [1], "meta_seed": None,
-            "git_sha": "deadbeef", "git_dirty": False, "git_diff": "",
+            "git_state": {"sha": "deadbeef", "dirty": False, "diff": ""},
             "allow_dirty": False,
         },
         "host": "h",

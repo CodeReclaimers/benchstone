@@ -5,10 +5,10 @@ import json
 import os
 import secrets
 from dataclasses import asdict, dataclass, field
-from datetime import datetime, timezone
 from pathlib import Path
 
 from . import paths
+from ._timefmt import utc_now
 
 JobStatus = str  # "pending" | "running" | "done" | "failed" | "stale"
 
@@ -39,25 +39,48 @@ class Job:
 
 
 def new_job_id() -> str:
-    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S")
-    return f"{stamp}-{secrets.token_hex(3)}"
+    from ._timefmt import utc_stamp_tag
+    # Strip the trailing 'Z' so the id keeps its original shape.
+    return f"{utc_stamp_tag()[:-1]}-{secrets.token_hex(3)}"
+
+
+def job_dir(job_id: str) -> Path:
+    """Per-job subdirectory holding job.json, spec.json, and worker.log.
+
+    Each job owns its own directory so list_all can enumerate jobs by looking
+    at top-level entries in $BENCHSTONE_HOME/jobs/ without needing to filter
+    filename suffixes.
+    """
+    return paths.jobs_dir() / job_id
 
 
 def job_file(job_id: str) -> Path:
-    return paths.jobs_dir() / f"{job_id}.json"
+    return job_dir(job_id) / "job.json"
 
 
 def spec_file(job_id: str) -> Path:
-    return paths.jobs_dir() / f"{job_id}.spec.json"
+    return job_dir(job_id) / "spec.json"
+
+
+def worker_log_file(job_id: str) -> Path:
+    return job_dir(job_id) / "worker.log"
 
 
 def save(job: Job) -> None:
-    """Atomically persist the job descriptor to $BENCHSTONE_HOME/jobs/<id>.json."""
-    paths.jobs_dir().mkdir(parents=True, exist_ok=True)
+    """Atomically persist the job descriptor to $BENCHSTONE_HOME/jobs/<id>/job.json."""
+    job_dir(job.job_id).mkdir(parents=True, exist_ok=True)
     final = job_file(job.job_id)
     tmp = final.with_suffix(".json.tmp")
-    tmp.write_text(json.dumps(asdict(job), indent=2, sort_keys=True))
+    _write_private(tmp, json.dumps(asdict(job), indent=2, sort_keys=True))
     tmp.replace(final)
+
+
+def _write_private(path: Path, content: str) -> None:
+    """Write `content` to `path` with 0o600 permissions (owner-only)."""
+    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
+    fd = os.open(path, flags, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        f.write(content)
 
 
 def load(job_id: str) -> Job:
@@ -69,11 +92,28 @@ def list_all() -> list[Job]:
     d = paths.jobs_dir()
     if not d.exists():
         return []
-    return [
-        _job_from_dict(json.loads(f.read_text()))
-        for f in sorted(d.glob("*.json"))
-        if not f.name.endswith(".spec.json") and not f.name.endswith(".tmp")
-    ]
+    out: list[Job] = []
+    for entry in sorted(d.iterdir()):
+        if not entry.is_dir():
+            continue
+        jf = entry / "job.json"
+        if not jf.exists():
+            continue
+        out.append(_job_from_dict(json.loads(jf.read_text())))
+    return out
+
+
+def discard_spec(job_id: str) -> None:
+    """Best-effort deletion of the spec file once the worker is done with it.
+
+    The spec file carries plan data (including any git diff bytes) and is only
+    needed while the worker is running. Removing it on terminal status keeps
+    $BENCHSTONE_HOME/jobs/ from growing without bound.
+    """
+    try:
+        spec_file(job_id).unlink()
+    except FileNotFoundError:
+        pass
 
 
 def is_pid_alive(pid: int) -> bool:
@@ -97,7 +137,7 @@ def refresh_staleness(jobs: list[Job]) -> list[Job]:
             j = dataclasses.replace(
                 j,
                 status="stale",
-                ended_at=_utc_now(),
+                ended_at=utc_now(),
                 message="worker PID not alive when status refreshed",
             )
             save(j)
@@ -121,7 +161,3 @@ def _job_from_dict(data: dict) -> Job:
         inserted_run_ids=list(data.get("inserted_run_ids", [])),
         message=data.get("message"),
     )
-
-
-def _utc_now() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")

@@ -18,6 +18,7 @@ baseline_seeds = [1, 2, 3]
 promotion_sigma = 2.0
 corpus_path = "bench/corpus/fake"
 corpus_hash = "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+corpus_type = "bytes"
 
 [[benchmarks]]
 name = "fake_heavy"

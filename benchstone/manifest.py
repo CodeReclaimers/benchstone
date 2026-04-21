@@ -19,8 +19,9 @@ KNOWN_PROJECT_FIELDS: frozenset[str] = frozenset({"name", "language", "invocatio
 KNOWN_BENCHMARK_FIELDS: frozenset[str] = frozenset({
     "name", "entry_point", "tier", "deterministic", "metric_direction",
     "expected_runtime_seconds", "threads", "gpu", "background_required",
-    "repetitions", "baseline_seeds", "promotion_sigma", "gate_policy",
-    "corpus_path", "corpus_hash", "corpus_type", "reference_policy",
+    "repetitions", "baseline_seeds", "promotion_sigma", "promotion_z",
+    "gate_policy", "corpus_path", "corpus_hash", "corpus_type",
+    "reference_policy",
 })
 
 VALID_CORPUS_TYPES: frozenset[str] = frozenset({"bytes", "spec"})
@@ -53,6 +54,7 @@ class Benchmark:
     repetitions: int
     baseline_seeds: tuple[int, ...]
     promotion_sigma: float | None
+    promotion_z: float | None
     corpus_path: str | None
     corpus_hash: str | None
     corpus_type: str | None
@@ -192,7 +194,14 @@ def _parse_benchmark(entry: dict, idx: int) -> Benchmark:
         )
     if corpus_type is None and entry.get("corpus_hash"):
         # Default to 'bytes' when a hash is present — back-compat for
-        # manifests authored before corpus_type existed.
+        # manifests authored before corpus_type existed. Warn so the
+        # back-compat path is visible and can be removed on a schedule.
+        warnings.warn(
+            f"manifest: benchmarks[{idx}] sets corpus_hash without "
+            f"corpus_type; defaulting to 'bytes' for back-compat. "
+            f"Set corpus_type explicitly to silence this warning.",
+            stacklevel=4,
+        )
         corpus_type = "bytes"
 
     gate_policy = entry.get("gate_policy", "sigma")
@@ -200,6 +209,19 @@ def _parse_benchmark(entry: dict, idx: int) -> Benchmark:
         raise ManifestError(
             f"benchmarks[{idx}].gate_policy must be one of "
             f"{sorted(VALID_GATE_POLICIES)}, got {gate_policy!r}"
+        )
+
+    promotion_z = entry.get("promotion_z")
+    if promotion_z is not None:
+        promotion_z = float(promotion_z)
+    if gate_policy == "mann_whitney" and promotion_z is None and not is_correctness:
+        warnings.warn(
+            f"manifest: benchmarks[{idx}] uses gate_policy='mann_whitney' without "
+            f"promotion_z; falling back to promotion_sigma as the z-threshold. "
+            f"Mann-Whitney z-scores are bounded by ~sqrt(3n^2/(2n+1)) and sigma "
+            f"thresholds calibrated for parametric z do not transfer directly. "
+            f"Set promotion_z explicitly to silence this warning.",
+            stacklevel=4,
         )
 
     return Benchmark(
@@ -218,6 +240,7 @@ def _parse_benchmark(entry: dict, idx: int) -> Benchmark:
         repetitions=repetitions,
         baseline_seeds=tuple(baseline_seeds),
         promotion_sigma=float(promotion_sigma) if promotion_sigma is not None else None,
+        promotion_z=promotion_z,
         corpus_path=entry.get("corpus_path"),
         corpus_hash=entry.get("corpus_hash"),
         corpus_type=corpus_type,

@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import contextlib
 import json
 import sqlite3
+from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -72,19 +74,19 @@ class Run:
     benchmark: str
     git_sha: str
     git_dirty: bool
-    dirty_diff_path: str | None
     timestamp: str
     harness_version: str
     host: str
-    seed: int | None
-    meta_seed: int | None
-    repetition_index: int | None
     status: str
-    metric: float | None
-    metric_components: dict[str, Any] | None
-    wall_clock_seconds: float | None
-    project_metadata: dict[str, Any] | None
-    stderr_log_path: str | None
+    dirty_diff_path: str | None = None
+    seed: int | None = None
+    meta_seed: int | None = None
+    repetition_index: int | None = None
+    metric: float | None = None
+    metric_components: dict[str, Any] | None = None
+    wall_clock_seconds: float | None = None
+    project_metadata: dict[str, Any] | None = None
+    stderr_log_path: str | None = None
     artifact_hash: str | None = None
     artifact_path: str | None = None
 
@@ -103,6 +105,9 @@ class Store:
         self._conn.executescript(SCHEMA)
         self._apply_migrations()
         self._conn.commit()
+        # When > 0, inner insert/set_baseline calls skip the per-op commit so
+        # the surrounding transaction() block can batch them atomically.
+        self._in_txn: int = 0
 
     def _apply_migrations(self) -> None:
         existing = {row[1] for row in self._conn.execute("PRAGMA table_info(runs)").fetchall()}
@@ -127,25 +132,74 @@ class Store:
             f"INSERT INTO runs ({cols}) VALUES ({placeholders})",
             tuple(row.values()),
         )
-        self._conn.commit()
+        if self._in_txn == 0:
+            self._conn.commit()
         return int(cur.lastrowid)
+
+    @contextlib.contextmanager
+    def transaction(self) -> Iterator[None]:
+        """Batch inserts and set_baseline into a single atomic commit.
+
+        Nested ``with store.transaction()`` blocks join the outermost scope —
+        only the outermost commit is observable. If the body raises the
+        connection is rolled back.
+        """
+        outermost = self._in_txn == 0
+        self._in_txn += 1
+        try:
+            yield
+        except BaseException:
+            self._in_txn -= 1
+            if outermost:
+                self._conn.rollback()
+            raise
+        else:
+            self._in_txn -= 1
+            if outermost:
+                self._conn.commit()
 
     def fetch_runs(
         self,
         project: str,
         benchmark: str,
         git_sha: str | None = None,
+        *,
+        git_sha_prefix: str | None = None,
+        since: str | None = None,
+        limit: int | None = None,
     ) -> list[Run]:
-        if git_sha is None:
-            cur = self._conn.execute(
-                "SELECT * FROM runs WHERE project=? AND benchmark=? ORDER BY id",
-                (project, benchmark),
-            )
-        else:
-            cur = self._conn.execute(
-                "SELECT * FROM runs WHERE project=? AND benchmark=? AND git_sha=? ORDER BY id",
-                (project, benchmark, git_sha),
-            )
+        """Fetch runs with optional server-side filters.
+
+        - ``git_sha``: exact match on the full SHA.
+        - ``git_sha_prefix``: match any row whose git_sha starts with this string.
+        - ``since``: ISO timestamp lower bound (inclusive). Lexical comparison
+          works because all stored timestamps share the UTC-second format.
+        - ``limit``: keep only the most recent N after filters are applied.
+          The returned list is still in ascending-id order (the timeline).
+        """
+        clauses: list[str] = ["project=? AND benchmark=?"]
+        args: list[Any] = [project, benchmark]
+        if git_sha is not None:
+            clauses.append("git_sha=?")
+            args.append(git_sha)
+        if git_sha_prefix is not None:
+            clauses.append("git_sha LIKE ?")
+            args.append(git_sha_prefix + "%")
+        if since is not None:
+            clauses.append("timestamp>=?")
+            args.append(since)
+        sql = f"SELECT * FROM runs WHERE {' AND '.join(clauses)}"
+        if limit is not None and limit >= 0:
+            # Take the last N rows by descending id then reverse, so SQLite
+            # doesn't decode rows we're about to throw away.
+            sql += " ORDER BY id DESC LIMIT ?"
+            args.append(limit)
+            cur = self._conn.execute(sql, tuple(args))
+            rows = list(cur.fetchall())
+            rows.reverse()
+            return [_row_to_run(r) for r in rows]
+        sql += " ORDER BY id"
+        cur = self._conn.execute(sql, tuple(args))
         return [_row_to_run(r) for r in cur.fetchall()]
 
     def fetch_baseline_runs(
@@ -205,7 +259,8 @@ class Store:
             """,
             (project, benchmark, git_sha, established_at, notes),
         )
-        self._conn.commit()
+        if self._in_txn == 0:
+            self._conn.commit()
 
     def get_baseline(self, project: str, benchmark: str) -> Baseline | None:
         cur = self._conn.execute(

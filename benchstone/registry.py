@@ -19,6 +19,14 @@ class RegisteredProject:
     manifest_hash: str
 
 
+@dataclass(frozen=True)
+class RegisterResult:
+    """Outcome of Registry.register: the stored project, and the prior path
+    at the same name (if any) so the caller can flag unexpected overwrites."""
+    project: RegisteredProject
+    prior_path: Path | None
+
+
 class Registry:
     """JSON-backed project registry.
 
@@ -44,23 +52,42 @@ class Registry:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.path.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n")
 
-    def register(self, project_path: str | Path) -> RegisteredProject:
+    def register(self, project_path: str | Path) -> "RegisterResult":
         project_path = Path(project_path).expanduser().resolve()
         if not project_path.is_dir():
             raise RegistryError(f"project path is not a directory: {project_path}")
         manifest = load_manifest(project_path)
         data = self._read()
         projects = data.setdefault("projects", {})
+        prior = projects.get(manifest.project.name)
+        prior_path = Path(prior["path"]) if prior else None
         projects[manifest.project.name] = {
             "path": str(project_path),
             "manifest_hash": manifest.content_hash,
         }
         self._write(data)
-        return RegisteredProject(
-            name=manifest.project.name,
-            path=project_path,
-            manifest_hash=manifest.content_hash,
+        return RegisterResult(
+            project=RegisteredProject(
+                name=manifest.project.name,
+                path=project_path,
+                manifest_hash=manifest.content_hash,
+            ),
+            prior_path=prior_path,
         )
+
+    def unregister(self, name: str) -> Path:
+        """Remove the named project from the registry. Returns the path it held.
+
+        Raises RegistryError if the project is not registered. Does not touch
+        the project directory itself or any runs already in the store.
+        """
+        data = self._read()
+        projects = data.get("projects", {})
+        if name not in projects:
+            raise RegistryError(f"project not registered: {name!r}")
+        removed = projects.pop(name)
+        self._write(data)
+        return Path(removed["path"])
 
     def list_projects(self) -> list[RegisteredProject]:
         data = self._read()

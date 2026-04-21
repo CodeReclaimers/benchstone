@@ -1,13 +1,13 @@
 from __future__ import annotations
 
 import socket
-from datetime import datetime, timezone
 from pathlib import Path
 
 import click
 
 from . import __version__, background, jobs, paths, references
-from .gate import Verdict, evaluate as gate_evaluate
+from ._timefmt import utc_now
+from .gate import ALL_VERDICT_KINDS, Verdict, evaluate as gate_evaluate
 from .manifest import Benchmark, ManifestError, Project, load as load_manifest
 from .provenance import GitState, ProvenanceError, git_state
 from .references import ReferenceError
@@ -39,11 +39,29 @@ def register(project_path: str) -> None:
     """Register a project located at PROJECT_PATH."""
     registry = Registry()
     try:
-        rp = registry.register(project_path)
+        result = registry.register(project_path)
     except (RegistryError, ManifestError) as exc:
         raise click.ClickException(str(exc))
+    rp = result.project
+    if result.prior_path is not None and result.prior_path != rp.path:
+        click.echo(
+            f"warning: {rp.name} was registered at {result.prior_path}; "
+            f"pointer moved to {rp.path}"
+        )
     click.echo(f"registered {rp.name}  {rp.path}")
     click.echo(f"  manifest: {rp.manifest_hash}")
+
+
+@main.command()
+@click.argument("project_name")
+def unregister(project_name: str) -> None:
+    """Forget a project. Does not touch the project directory or the store."""
+    registry = Registry()
+    try:
+        prior = registry.unregister(project_name)
+    except RegistryError as exc:
+        raise click.ClickException(str(exc))
+    click.echo(f"unregistered {project_name}  (was {prior})")
 
 
 @main.command("list")
@@ -253,12 +271,6 @@ def _annotate_notes(notes: str | None, at_sha: str) -> str:
     return f"{tag} {notes}" if notes else tag
 
 
-VALID_VERDICT_KINDS: frozenset[str] = frozenset({
-    "PROMOTE", "REJECT", "NEEDS_MORE_DATA", "NO_BASELINE",
-    "PASS", "FAIL", "NO_REFERENCE",
-})
-
-
 @main.command()
 @click.argument("project_name")
 @click.argument("benchmark_name")
@@ -271,11 +283,12 @@ def evaluate(
     """Compare runs at the current SHA against the recorded baseline. Read-only."""
     project_path, project, benchmark = _resolve(project_name, benchmark_name)
     gstate = _require_git_state(project_path)
-    if expect is not None and expect not in VALID_VERDICT_KINDS:
+    if expect is not None and expect not in ALL_VERDICT_KINDS:
         raise click.ClickException(
-            f"--expect must be one of {sorted(VALID_VERDICT_KINDS)}, got {expect!r}"
+            f"--expect must be one of {sorted(ALL_VERDICT_KINDS)}, got {expect!r}"
         )
-    verdict = _compute_verdict(project, benchmark, project_path, gstate.sha)
+    with Store(paths.store_path()) as store:
+        verdict = _compute_verdict(project, benchmark, project_path, gstate.sha, store)
     _print_verdict(project, benchmark, gstate.sha, verdict)
     if expect is not None:
         if verdict.kind == expect:
@@ -298,15 +311,14 @@ def promote(
     """Update the baseline pointer to the current SHA if the verdict is PROMOTE."""
     project_path, project, benchmark = _resolve(project_name, benchmark_name)
     gstate = _require_git_state(project_path)
-    verdict = _compute_verdict(project, benchmark, project_path, gstate.sha)
-    _print_verdict(project, benchmark, gstate.sha, verdict)
-    if verdict.kind != "PROMOTE" and not force:
-        raise click.ClickException(
-            f"refusing to promote: verdict is {verdict.kind} (pass --force to override)"
-        )
     with Store(paths.store_path()) as store:
-        now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-        store.set_baseline(project.name, benchmark.name, gstate.sha, now, notes)
+        verdict = _compute_verdict(project, benchmark, project_path, gstate.sha, store)
+        _print_verdict(project, benchmark, gstate.sha, verdict)
+        if verdict.kind != "PROMOTE" and not force:
+            raise click.ClickException(
+                f"refusing to promote: verdict is {verdict.kind} (pass --force to override)"
+            )
+        store.set_baseline(project.name, benchmark.name, gstate.sha, utc_now(), notes)
     click.echo(f"baseline promoted: {project.name}/{benchmark.name} -> {gstate.sha[:10]}")
 
 
@@ -394,19 +406,14 @@ def history_cmd(
 ) -> None:
     """Print a timeline of runs for PROJECT_NAME/BENCHMARK_NAME."""
     with Store(paths.store_path()) as store:
-        runs = store.fetch_runs(project_name, benchmark_name)
-    if git_sha is not None:
-        runs = [r for r in runs if r.git_sha.startswith(git_sha)]
-    if since is not None:
-        runs = [r for r in runs if r.timestamp >= since]
-    if limit is not None and limit >= 0:
-        runs = runs[-limit:]
+        runs = store.fetch_runs(
+            project_name, benchmark_name,
+            git_sha_prefix=git_sha, since=since, limit=limit,
+        )
+        baseline_row = store.get_baseline(project_name, benchmark_name)
     if not runs:
         click.echo("(no runs match)")
         return
-
-    with Store(paths.store_path()) as store:
-        baseline_row = store.get_baseline(project_name, benchmark_name)
     baseline_sha = baseline_row.git_sha if baseline_row is not None else None
     if baseline_sha:
         click.echo(f"# baseline @ {baseline_sha[:10]}")
@@ -528,25 +535,31 @@ def _dispatch(
 
     with Store(paths.store_path()) as store:
         try:
-            ids = runner_execute(
-                project=project,
-                project_path=project_path,
-                benchmark=benchmark,
-                plan=plan,
-                store=store,
-                host=host,
-                logs_root=paths.logs_dir(),
-                artifacts_root=paths.artifacts_dir(),
-            )
+            # Transaction spans the rep loop AND the baseline pointer update so
+            # the two either land together or not at all. A process kill between
+            # "runs inserted" and "baseline moved" would otherwise leave the
+            # store with orphaned runs and the pointer still on the old SHA.
+            with store.transaction():
+                ids = runner_execute(
+                    project=project,
+                    project_path=project_path,
+                    benchmark=benchmark,
+                    plan=plan,
+                    store=store,
+                    host=host,
+                    logs_root=paths.logs_dir(),
+                    artifacts_root=paths.artifacts_dir(),
+                )
+                if set_baseline:
+                    store.set_baseline(
+                        project.name, benchmark.name, plan.git_state.sha,
+                        utc_now(), baseline_notes,
+                    )
         except RunnerError as exc:
             raise click.ClickException(str(exc))
         _summarize_runs(store, ids, plan)
 
         if set_baseline:
-            now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-            store.set_baseline(
-                project.name, benchmark.name, plan.git_state.sha, now, baseline_notes
-            )
             click.echo(
                 f"baseline set: {project.name}/{benchmark.name} -> "
                 f"{plan.git_state.sha[:10]} ({len(ids)} run(s))"
@@ -592,27 +605,30 @@ def _resolve_artifact_run(
 
 
 def _compute_verdict(
-    project: Project, benchmark: Benchmark, project_path: Path, current_sha: str
+    project: Project,
+    benchmark: Benchmark,
+    project_path: Path,
+    current_sha: str,
+    store: Store,
 ) -> Verdict:
-    with Store(paths.store_path()) as store:
-        if benchmark.tier == "correctness":
-            reference = references.get(project.name, benchmark.name)
-            candidate_runs = store.fetch_candidate_runs(
-                project.name, benchmark.name, current_sha
-            )
-            return gate_evaluate(
-                benchmark, None, [], candidate_runs, reference=reference
-            )
-        baseline_row = store.get_baseline(project.name, benchmark.name)
-        if baseline_row is None:
-            return gate_evaluate(benchmark, None, [], [])
-        baseline_runs = store.fetch_baseline_runs(
-            project.name, benchmark.name, baseline_row.git_sha
-        )
+    if benchmark.tier == "correctness":
+        reference = references.get(project.name, benchmark.name)
         candidate_runs = store.fetch_candidate_runs(
             project.name, benchmark.name, current_sha
         )
-        return gate_evaluate(benchmark, baseline_row, baseline_runs, candidate_runs)
+        return gate_evaluate(
+            benchmark, None, [], candidate_runs, reference=reference
+        )
+    baseline_row = store.get_baseline(project.name, benchmark.name)
+    if baseline_row is None:
+        return gate_evaluate(benchmark, None, [], [])
+    baseline_runs = store.fetch_baseline_runs(
+        project.name, benchmark.name, baseline_row.git_sha
+    )
+    candidate_runs = store.fetch_candidate_runs(
+        project.name, benchmark.name, current_sha
+    )
+    return gate_evaluate(benchmark, baseline_row, baseline_runs, candidate_runs)
 
 
 BASELINE_CV_WARN = 0.05  # SE/|mean| above this triggers a fragility hint.
@@ -624,7 +640,7 @@ def _print_verdict(
     click.echo(f"{project.name} / {benchmark.name}")
     click.echo(f"  current_sha: {current_sha[:10]}")
     click.echo(f"  tier:        {benchmark.tier}")
-    if benchmark.tier == "correctness":
+    if v.category == "correctness":
         if v.reference_hash is not None:
             click.echo(f"  reference:   {v.reference_hash}")
         if v.candidate_hash is not None:

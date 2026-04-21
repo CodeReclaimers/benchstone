@@ -14,12 +14,6 @@ def benchstone_home() -> Path:
     return Path.home() / ".local" / "share" / "benchstone"
 
 
-def ensure_home() -> Path:
-    home = benchstone_home()
-    home.mkdir(parents=True, exist_ok=True)
-    return home
-
-
 def registry_path() -> Path:
     return benchstone_home() / "registry.json"
 

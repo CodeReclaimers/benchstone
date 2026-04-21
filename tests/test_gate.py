@@ -24,6 +24,7 @@ def _bench(**overrides: Any) -> Benchmark:
         repetitions=5,
         baseline_seeds=(1, 2, 3, 4, 5),
         promotion_sigma=2.0,
+        promotion_z=None,
         corpus_path=None,
         corpus_hash=None,
         corpus_type=None,

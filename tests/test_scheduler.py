@@ -15,7 +15,7 @@ def _bench(**overrides: Any) -> Benchmark:
         deterministic=False, metric_direction="minimize",
         expected_runtime_seconds=None, threads=1, gpu="none",
         background_required=False, repetitions=3, baseline_seeds=(1, 2, 3),
-        promotion_sigma=2.0, corpus_path=None, corpus_hash=None,
+        promotion_sigma=2.0, promotion_z=None, corpus_path=None, corpus_hash=None,
         corpus_type=None, reference_policy=None, gate_policy="sigma",
     )
     base.update(overrides)

@@ -15,6 +15,17 @@ class GitState:
     dirty: bool
     diff: str  # content of `git diff HEAD` when dirty; empty string otherwise
 
+    def to_dict(self) -> dict:
+        return {"sha": self.sha, "dirty": self.dirty, "diff": self.diff}
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "GitState":
+        return cls(
+            sha=str(data["sha"]),
+            dirty=bool(data["dirty"]),
+            diff=data.get("diff", ""),
+        )
+
 
 def git_state(path: str | Path) -> GitState:
     """Return the git SHA, dirty flag, and diff for the repository containing `path`.

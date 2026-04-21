@@ -9,6 +9,7 @@ from __future__ import annotations
 import contextlib
 import shutil
 import subprocess
+import sys
 import tempfile
 from collections.abc import Iterator
 from pathlib import Path
@@ -47,15 +48,20 @@ def with_git_worktree(project_path: Path, sha: str) -> Iterator[Path]:
         )
         yield wt_path
     finally:
-        # Best-effort cleanup; swallow errors so the user sees the primary one.
+        # Best-effort cleanup; swallow errors so the user sees the primary one,
+        # but surface a warning so stale worktrees are detectable.
         try:
             _run_git(
                 project_path,
                 ["worktree", "remove", "--force", str(wt_path)],
                 error="worktree remove failed",
             )
-        except WorktreeError:
-            pass
+        except WorktreeError as exc:
+            print(
+                f"benchstone: warning: failed to remove worktree at {wt_path}: {exc}",
+                file=sys.stderr,
+                flush=True,
+            )
         shutil.rmtree(parent, ignore_errors=True)
 
 

@@ -29,6 +29,20 @@ It's also useful without any agent in the loop. Having a single place that knows
 - **Benchmarks come in tiers.** Correctness is pass/fail; performance and quality are statistical.
 - **The harness is domain-ignorant.** It knows how to run a subprocess and reason about numbers; everything else belongs to the project.
 
+## Security model
+
+Manifests are trusted code. A project's `bench/manifest.toml` specifies an
+`invocation` template that benchstone executes via the shell, so registering
+a project grants its manifest the ability to run arbitrary commands on the
+host whenever any benchstone invocation touches that project. Only register
+projects whose manifest you have read, and do not copy invocation templates
+from untrusted sources.
+
+Diffs, stderr logs, and background-job spec files are written with
+owner-only (`0o600`) permissions because git diffs can capture pre-commit
+secrets (edits to `.env`, key files). On shared hosts this limits exposure
+to the user running benchstone.
+
 ## Status
 
 Early. First customer is [Arborist.jl](https://github.com/CodeReclaimers/Arborist.jl); contract may change as additional projects onboard.

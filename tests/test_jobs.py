@@ -43,14 +43,28 @@ def test_list_all_returns_sorted(isolated_home: Path) -> None:
     assert [x.job_id for x in listed] == [j1.job_id, j2.job_id]
 
 
-def test_list_all_ignores_spec_and_tmp_files(isolated_home: Path) -> None:
+def test_list_all_ignores_stray_files(isolated_home: Path) -> None:
     j = _job()
     jobs.save(j)
-    # Drop sibling files that must not be picked up.
-    (isolated_home / "jobs" / f"{j.job_id}.spec.json").write_text("{}")
+    # Junk at the top level of the jobs dir — a stray file, and a directory
+    # without the expected job.json — must both be ignored.
     (isolated_home / "jobs" / "orphan.json.tmp").write_text("{}")
+    (isolated_home / "jobs" / "partial-dir").mkdir()
     listed = jobs.list_all()
     assert [x.job_id for x in listed] == [j.job_id]
+
+
+def test_discard_spec_is_safe_when_absent(isolated_home: Path) -> None:
+    j = _job()
+    jobs.save(j)
+    # No spec file was ever written; discard should not raise.
+    jobs.discard_spec(j.job_id)
+    spec = jobs.spec_file(j.job_id)
+    spec.parent.mkdir(parents=True, exist_ok=True)
+    spec.write_text("{}")
+    assert spec.exists()
+    jobs.discard_spec(j.job_id)
+    assert not spec.exists()
 
 
 def test_is_pid_alive_self() -> None:

@@ -4,7 +4,7 @@ import math
 
 import pytest
 
-from benchstone.stats import directed_sigma, mann_whitney_z, mean_se
+from benchstone.stats import directed_z, mann_whitney_z, mean_se
 
 
 def test_mean_se_basic() -> None:
@@ -21,43 +21,43 @@ def test_mean_se_requires_two_samples() -> None:
         mean_se([])
 
 
-def test_directed_sigma_minimize_improvement_positive() -> None:
+def test_directed_z_minimize_improvement_positive() -> None:
     baseline = [10.0, 10.1, 9.9, 10.05, 9.95]
     candidate = [9.0, 9.1, 8.9, 9.05, 8.95]  # lower is better for minimize
-    sigma = directed_sigma(baseline, candidate, "minimize")
+    sigma = directed_z(baseline, candidate, "minimize")
     assert sigma > 0
 
 
-def test_directed_sigma_maximize_improvement_positive() -> None:
+def test_directed_z_maximize_improvement_positive() -> None:
     baseline = [10.0, 10.1, 9.9, 10.05, 9.95]
     candidate = [11.0, 11.1, 10.9, 11.05, 10.95]  # higher is better for maximize
-    sigma = directed_sigma(baseline, candidate, "maximize")
+    sigma = directed_z(baseline, candidate, "maximize")
     assert sigma > 0
 
 
-def test_directed_sigma_regression_negative() -> None:
+def test_directed_z_regression_negative() -> None:
     baseline = [10.0, 10.1, 9.9, 10.05, 9.95]
     candidate = [11.0, 11.1, 10.9, 11.05, 10.95]  # worse for minimize
-    sigma = directed_sigma(baseline, candidate, "minimize")
+    sigma = directed_z(baseline, candidate, "minimize")
     assert sigma < 0
 
 
-def test_directed_sigma_identical_samples_zero() -> None:
+def test_directed_z_identical_samples_zero() -> None:
     xs = [1.0, 2.0, 3.0]
-    assert directed_sigma(xs, xs, "minimize") == 0.0
+    assert directed_z(xs, xs, "minimize") == 0.0
 
 
-def test_directed_sigma_zero_variance_differing_means() -> None:
+def test_directed_z_zero_variance_differing_means() -> None:
     baseline = [1.0, 1.0, 1.0]
     candidate = [2.0, 2.0, 2.0]
     # worse for minimize, better for maximize
-    assert directed_sigma(baseline, candidate, "minimize") == -math.inf
-    assert directed_sigma(baseline, candidate, "maximize") == math.inf
+    assert directed_z(baseline, candidate, "minimize") == -math.inf
+    assert directed_z(baseline, candidate, "maximize") == math.inf
 
 
-def test_directed_sigma_rejects_bad_direction() -> None:
+def test_directed_z_rejects_bad_direction() -> None:
     with pytest.raises(ValueError, match="direction must be"):
-        directed_sigma([1.0, 2.0], [1.0, 2.0], "sideways")
+        directed_z([1.0, 2.0], [1.0, 2.0], "sideways")
 
 
 # --- Mann-Whitney z ---

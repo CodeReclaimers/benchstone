@@ -160,7 +160,8 @@ def test_corpus_type_defaults_to_bytes_when_hash_present(tmp_path: Path) -> None
         corpus_path = "bench/corpus/x"
         corpus_hash = "sha256:deadbeef"
     """)
-    m = load(path)
+    with pytest.warns(UserWarning, match="corpus_hash without corpus_type"):
+        m = load(path)
     assert m.benchmark("b").corpus_type == "bytes"
 
 
@@ -238,10 +239,33 @@ def test_gate_policy_mann_whitney_parsed(tmp_path: Path) -> None:
         tier = "quality"
         metric_direction = "minimize"
         promotion_sigma = 2.0
+        promotion_z = 2.0
         gate_policy = "mann_whitney"
     """)
     m = load(path)
     assert m.benchmark("b").gate_policy == "mann_whitney"
+    assert m.benchmark("b").promotion_z == 2.0
+
+
+def test_gate_policy_mann_whitney_without_z_warns(tmp_path: Path) -> None:
+    path = _write(tmp_path, """
+        [project]
+        name = "p"
+        language = "python"
+        invocation = "true"
+
+        [[benchmarks]]
+        name = "b"
+        entry_point = "b"
+        tier = "quality"
+        metric_direction = "minimize"
+        promotion_sigma = 2.0
+        gate_policy = "mann_whitney"
+    """)
+    with pytest.warns(UserWarning, match="promotion_z"):
+        m = load(path)
+    assert m.benchmark("b").gate_policy == "mann_whitney"
+    assert m.benchmark("b").promotion_z is None
 
 
 def test_gate_policy_invalid_raises(tmp_path: Path) -> None:

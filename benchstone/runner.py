@@ -1,3 +1,20 @@
+"""Benchmark dispatch and execution.
+
+Security model: the manifest's ``project.invocation`` template is executed
+via ``subprocess.run(..., shell=True)`` so project authors can write shell
+pipelines (redirects, env-var expansion, etc.) naturally. This means:
+
+    **Manifests are trusted code.**
+
+Registering a project (``bench register PATH``) grants that project's
+``bench/manifest.toml`` the ability to run arbitrary commands on the host
+whenever any benchstone invocation touches that project. Do not register
+projects whose manifest you haven't read, and do not copy-paste invocation
+templates from untrusted sources. Harness-controlled substitutions
+(``{config_path}``, ``{output_path}``) come from a ``benchstone-*`` tempdir
+and are not user-supplied, but anything else in the template is a raw shell
+fragment under the project author's control.
+"""
 from __future__ import annotations
 
 import hashlib
@@ -8,10 +25,10 @@ import subprocess
 import tempfile
 import time
 from dataclasses import dataclass
-from datetime import datetime, timezone
 from pathlib import Path
 
 from . import __version__
+from ._timefmt import utc_now, utc_stamp_tag
 from .manifest import Benchmark, Project
 from .protocol import InvocationConfig, ProjectResult, ProtocolError
 from .provenance import GitState
@@ -34,6 +51,23 @@ class RunPlan:
     meta_seed: int | None
     git_state: GitState
     allow_dirty: bool = False
+
+    def to_dict(self) -> dict:
+        return {
+            "seeds": list(self.seeds),
+            "meta_seed": self.meta_seed,
+            "git_state": self.git_state.to_dict(),
+            "allow_dirty": self.allow_dirty,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "RunPlan":
+        return cls(
+            seeds=tuple(int(s) for s in data["seeds"]),
+            meta_seed=data["meta_seed"],
+            git_state=GitState.from_dict(data["git_state"]),
+            allow_dirty=bool(data["allow_dirty"]),
+        )
 
 
 def plan_baseline(
@@ -77,6 +111,10 @@ def plan_evaluation(
     if meta_seed is None:
         meta_seed = int.from_bytes(os.urandom(8), "big") & 0x7FFFFFFFFFFFFFFF
     rng = random.Random(meta_seed)
+    # Derived seeds are bounded to 2**31 - 1 so they round-trip cleanly through
+    # a C int32 (many C/C++ RNGs expect uint32_t; some Julia/Go APIs accept
+    # wider but we optimize for the narrowest consumer). The 63-bit meta_seed
+    # carries the entropy; per-rep seeds are just indices into its stream.
     seeds = tuple(rng.randrange(0, 2**31) for _ in range(n))
     return RunPlan(
         seeds=seeds,
@@ -147,9 +185,8 @@ def _run_one_rep(
     artifacts_root: Path | None,
     diff_path: str | None,
 ) -> int:
-    now = datetime.now(timezone.utc)
-    timestamp = now.strftime("%Y-%m-%dT%H:%M:%SZ")
-    ts_tag = now.strftime("%Y%m%dT%H%M%SZ")
+    timestamp = utc_now()
+    ts_tag = utc_stamp_tag()
 
     log_dir = logs_root / project.name / benchmark.name
     log_dir.mkdir(parents=True, exist_ok=True)
@@ -173,6 +210,7 @@ def _run_one_rep(
     is_correctness = benchmark.tier == "correctness"
     artifact_hash: str | None = None
     archived_artifact: str | None = None
+    elapsed: float = 0.0
 
     try:
         with tempfile.TemporaryDirectory(prefix="benchstone-") as tmp:
@@ -201,7 +239,7 @@ def _run_one_rep(
             )
 
             start = time.monotonic()
-            with open(stderr_log_path, "wb") as errfile:
+            with _open_private(stderr_log_path, "wb") as errfile:
                 completed = subprocess.run(
                     cmd,
                     shell=True,
@@ -238,7 +276,7 @@ def _run_one_rep(
         return store.insert_run(
             **base,
             status="error",
-            wall_clock_seconds=0.0,
+            wall_clock_seconds=elapsed,
             project_metadata={"error": f"{type(exc).__name__}: {exc}"},
         )
 
@@ -276,10 +314,28 @@ def _persist_diff(
 ) -> str:
     log_dir = logs_root / project_name / benchmark_name
     log_dir.mkdir(parents=True, exist_ok=True)
-    ts_tag = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    path = log_dir / f"{ts_tag}.diff"
-    path.write_text(diff)
+    path = log_dir / f"{utc_stamp_tag()}.diff"
+    # Diffs may contain pre-commit secrets (edits to .env, key files). Restrict
+    # to the owner rather than inheriting the default umask.
+    with _open_private(path, "w") as f:
+        f.write(diff)
     return str(path)
+
+
+def _open_private(path: Path, mode: str):
+    """Open `path` for writing with 0o600 permissions, creating if absent.
+
+    Accepts 'w' for text mode or 'wb' for binary; raises on any other mode.
+    """
+    if mode == "w":
+        binary = False
+    elif mode == "wb":
+        binary = True
+    else:
+        raise ValueError(f"_open_private only supports 'w'/'wb', got {mode!r}")
+    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
+    fd = os.open(path, flags, 0o600)
+    return os.fdopen(fd, "wb" if binary else "w")
 
 
 def _archive_artifact(

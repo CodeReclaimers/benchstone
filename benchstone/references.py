@@ -3,10 +3,10 @@ from __future__ import annotations
 import dataclasses
 import json
 from dataclasses import asdict, dataclass
-from datetime import datetime, timezone
 from pathlib import Path
 
 from . import paths
+from ._timefmt import utc_now
 from .store import Run, Store
 
 
@@ -124,7 +124,7 @@ def _build(project: str, benchmark: str, run: Run, notes: str | None) -> Referen
     return Reference(
         project=project,
         benchmark=benchmark,
-        frozen_at=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        frozen_at=utc_now(),
         frozen_git_sha=run.git_sha,
         content_hash=run.artifact_hash,
         content_path=run.artifact_path,
@@ -138,6 +138,7 @@ def _write(ref: Reference) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(".json.tmp")
     tmp.write_text(json.dumps(asdict(ref), indent=2, sort_keys=True))
+    tmp.chmod(0o600)
     tmp.replace(path)
 
 

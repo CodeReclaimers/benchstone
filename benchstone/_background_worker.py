@@ -12,12 +12,11 @@ import json
 import os
 import sys
 import traceback
-from datetime import datetime, timezone
 from pathlib import Path
 
 from . import jobs, paths
+from ._timefmt import utc_now
 from .manifest import load as load_manifest
-from .provenance import GitState
 from .runner import RunPlan, execute
 from .store import Store
 
@@ -38,38 +37,28 @@ def main(argv: list[str] | None = None) -> int:
         project_path = Path(spec["project_path"])
         manifest = load_manifest(project_path)
         benchmark = manifest.benchmark(spec["benchmark_name"])
-        plan_data = spec["plan"]
-        plan = RunPlan(
-            seeds=tuple(int(s) for s in plan_data["seeds"]),
-            meta_seed=plan_data["meta_seed"],
-            git_state=GitState(
-                sha=plan_data["git_sha"],
-                dirty=bool(plan_data["git_dirty"]),
-                diff=plan_data.get("git_diff", ""),
-            ),
-            allow_dirty=bool(plan_data["allow_dirty"]),
-        )
+        plan = RunPlan.from_dict(spec["plan"])
 
         with Store(paths.store_path()) as store:
-            ids = execute(
-                project=manifest.project,
-                project_path=project_path,
-                benchmark=benchmark,
-                plan=plan,
-                store=store,
-                host=spec["host"],
-                logs_root=paths.logs_dir(),
-                artifacts_root=paths.artifacts_dir(),
-            )
-            if spec.get("set_baseline"):
-                established_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-                store.set_baseline(
-                    manifest.project.name,
-                    benchmark.name,
-                    plan.git_state.sha,
-                    established_at,
-                    notes=spec.get("baseline_notes"),
+            with store.transaction():
+                ids = execute(
+                    project=manifest.project,
+                    project_path=project_path,
+                    benchmark=benchmark,
+                    plan=plan,
+                    store=store,
+                    host=spec["host"],
+                    logs_root=paths.logs_dir(),
+                    artifacts_root=paths.artifacts_dir(),
                 )
+                if spec.get("set_baseline"):
+                    store.set_baseline(
+                        manifest.project.name,
+                        benchmark.name,
+                        plan.git_state.sha,
+                        utc_now(),
+                        notes=spec.get("baseline_notes"),
+                    )
         _finalize(job_id, status="done", inserted_run_ids=ids)
         return 0
     except Exception as exc:
@@ -90,7 +79,7 @@ def _finalize(
     inserted_run_ids: list[int],
     message: str | None = None,
 ) -> None:
-    ended_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    ended_at = utc_now()
     job = jobs.load(job_id)
     jobs.save(dataclasses.replace(
         job,
@@ -99,6 +88,9 @@ def _finalize(
         inserted_run_ids=list(inserted_run_ids),
         message=message,
     ))
+    # Spec is only needed while the worker is running; drop it now so
+    # $BENCHSTONE_HOME/jobs/ doesn't accumulate diff-bearing artifacts.
+    jobs.discard_spec(job_id)
 
 
 if __name__ == "__main__":

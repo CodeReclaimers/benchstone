@@ -4,10 +4,10 @@ import dataclasses
 import json
 import subprocess
 import sys
-from datetime import datetime, timezone
 from pathlib import Path
 
 from . import jobs, paths
+from ._timefmt import utc_now
 from .manifest import Benchmark, Project
 from .runner import RunPlan
 
@@ -29,30 +29,26 @@ def spawn(
     """
     paths.jobs_dir().mkdir(parents=True, exist_ok=True)
     job_id = jobs.new_job_id()
-    worker_log_path = paths.jobs_dir() / f"{job_id}.worker.log"
+    jobs.job_dir(job_id).mkdir(parents=True, exist_ok=True)
+    worker_log_path = jobs.worker_log_file(job_id)
 
     spec = {
         "job_id": job_id,
         "project_name": project.name,
         "project_path": str(project_path),
         "benchmark_name": benchmark.name,
-        "plan": {
-            "seeds": list(plan.seeds),
-            "meta_seed": plan.meta_seed,
-            "git_sha": plan.git_state.sha,
-            "git_dirty": plan.git_state.dirty,
-            "git_diff": plan.git_state.diff,
-            "allow_dirty": plan.allow_dirty,
-        },
+        "plan": plan.to_dict(),
         "host": host,
         "benchstone_home": str(paths.benchstone_home()),
         "set_baseline": set_baseline,
         "baseline_notes": baseline_notes,
     }
     spec_path = jobs.spec_file(job_id)
-    spec_path.write_text(json.dumps(spec, indent=2, sort_keys=True))
+    # Spec carries plan.git_state.diff which may contain pre-commit secrets;
+    # restrict to the owner.
+    jobs._write_private(spec_path, json.dumps(spec, indent=2, sort_keys=True))
 
-    started_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    started_at = utc_now()
     initial = jobs.Job(
         job_id=job_id,
         pid=0,

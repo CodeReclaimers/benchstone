@@ -18,18 +18,25 @@ def mean_se(xs: Sequence[float]) -> tuple[float, float]:
     return mean, math.sqrt(variance / n)
 
 
-def directed_sigma(
+def directed_z(
     baseline: Sequence[float],
     candidate: Sequence[float],
     direction: str,
 ) -> float:
-    """Signed sigma such that positive values indicate candidate improvement.
+    """Signed z-score (difference-of-means / SE-of-difference), direction-adjusted.
 
-    For ``direction="minimize"``, a decrease in candidate metric versus baseline
-    is an improvement (positive sigma). For ``direction="maximize"``, an increase
-    is an improvement. When both samples have zero variance and identical means
-    the function returns 0.0; when variances are both zero but means differ it
-    returns +inf or -inf to reflect a deterministic shift.
+    The return value is a z-score against the standard error of the difference
+    of sample means — not a "sigma" in the standard-deviation-of-either-sample
+    sense. Positive values indicate candidate improvement after the direction
+    flip:
+
+    - ``direction="minimize"``: a decrease in candidate metric versus baseline
+      is an improvement (positive z).
+    - ``direction="maximize"``: an increase is an improvement (positive z).
+
+    When both samples have zero variance and identical means the function
+    returns 0.0; when variances are both zero but means differ it returns +inf
+    or -inf to reflect a deterministic shift.
     """
     if direction not in ("minimize", "maximize"):
         raise ValueError(
