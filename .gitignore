@@ -13,3 +13,6 @@ htmlcov/
 # Local launch material — kept out of the repo on purpose.
 SHOW_HN_DRAFT.md
 RELEASE_NOTES_DRAFT.md
+
+# Agent instructions — local only, not relevant to external users.
+CLAUDE.md
