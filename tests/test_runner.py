@@ -105,6 +105,28 @@ def test_execute_baseline_against_fake_project(
             assert Path(r.stderr_log_path).exists()
 
 
+def test_execute_refuses_on_corpus_drift(
+    fake_project_git: Path, tmp_path: Path
+) -> None:
+    # Mutate the on-disk corpus so its sha256 no longer matches the manifest's
+    # corpus_hash. The runner must refuse before invoking the project.
+    (fake_project_git / "bench" / "corpus" / "fake").write_bytes(b"tampered")
+    manifest = load_manifest(fake_project_git)
+    bench = manifest.benchmark("fake_quality")
+    gstate = git_state(fake_project_git)
+    assert gstate.dirty  # mutating the corpus dirties the tree
+    plan = plan_baseline(bench, gstate, allow_dirty=True)
+    with Store(tmp_path / "store.db") as store:
+        with pytest.raises(RunnerError, match="corpus drift"):
+            execute(
+                project=manifest.project, project_path=fake_project_git,
+                benchmark=bench, plan=plan, store=store,
+                host="testhost", logs_root=tmp_path / "logs",
+            )
+        # Refusal happens before any subprocess; no rows recorded.
+        assert store.fetch_runs("FakeProject", "fake_quality") == []
+
+
 def test_execute_rejects_dirty_tree_without_override(
     fake_project_git: Path, tmp_path: Path
 ) -> None:

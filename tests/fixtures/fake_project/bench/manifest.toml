@@ -17,7 +17,7 @@ repetitions = 3
 baseline_seeds = [1, 2, 3]
 promotion_sigma = 2.0
 corpus_path = "bench/corpus/fake"
-corpus_hash = "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+corpus_hash = "sha256:8bcd7bdaab8145bc0114071ee41517b0391d0ffab4079005bfb62e6c5770db82"
 corpus_type = "bytes"
 
 [[benchmarks]]

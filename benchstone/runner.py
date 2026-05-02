@@ -29,6 +29,7 @@ from pathlib import Path
 
 from . import __version__
 from ._timefmt import utc_now, utc_stamp_tag
+from .corpus import CorpusError, verify_corpus
 from .manifest import Benchmark, Project
 from .protocol import InvocationConfig, ProjectResult, ProtocolError
 from .provenance import GitState
@@ -144,6 +145,11 @@ def execute(
         raise RunnerError(
             "refusing to run against a dirty git tree; pass --allow-dirty to override"
         )
+
+    try:
+        verify_corpus(benchmark, project_path)
+    except CorpusError as exc:
+        raise RunnerError(str(exc)) from exc
 
     diff_path: str | None = None
     if plan.git_state.dirty and plan.git_state.diff:

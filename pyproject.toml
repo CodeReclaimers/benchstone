@@ -5,15 +5,46 @@ build-backend = "hatchling.build"
 [project]
 name = "benchstone"
 version = "0.1.0"
-description = "Portfolio-wide benchmark harness with append-only results and statistical gating."
+description = "Trustworthy benchmark gating for code-optimization loops: append-only results, harness-owned reference artifacts, statistical PROMOTE/REJECT verdicts."
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
 requires-python = ">=3.11"
-authors = [{ name = "Alan McIntyre" }]
+authors = [{ name = "Alan McIntyre", email = "alan@codereclaimers.com" }]
+keywords = [
+    "benchmark",
+    "regression-detection",
+    "statistical-gating",
+    "ai-agents",
+    "autoloop",
+    "performance-testing",
+    "reproducibility",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "Operating System :: POSIX",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development :: Testing",
+    "Topic :: Software Development :: Quality Assurance",
+    "Topic :: System :: Benchmark",
+]
 dependencies = [
     "click>=8.1",
 ]
 
+[project.urls]
+Homepage = "https://github.com/CodeReclaimers/benchstone"
+Repository = "https://github.com/CodeReclaimers/benchstone"
+Issues = "https://github.com/CodeReclaimers/benchstone/issues"
+
 [project.optional-dependencies]
-dev = ["pytest>=7.4"]
+dev = ["pytest>=7.4", "build>=1.2"]
 
 [project.scripts]
 bench = "benchstone.cli:main"

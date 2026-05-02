@@ -1,6 +1,15 @@
-# Benchmark Harness: Implementation Guide
+# Benchmark Harness: Implementation Guide (historical design doc)
 
-**Working name:** `codereclaimers-bench` (rename at will)
+> **Historical design doc, April 2026.** Written before the harness was named or
+> built. The implementation has since surpassed this guide and diverges from it
+> in places (the project is now called **benchstone**; phases described as
+> future work below have shipped; some specified behaviors — e.g., corpus-hash
+> drift enforcement — are not yet implemented). For the current behavior of the
+> harness, read [`README.md`](../README.md) and the code under
+> [`benchstone/`](../benchstone/). This document is retained for design context
+> only.
+
+**Working name:** `codereclaimers-bench` (renamed to `benchstone` before release)
 **First customer:** Arborist.jl
 **Purpose:** Provide a portfolio-wide measurement substrate that owns how benchmarks are run, stored, and statistically gated, while projects own what their benchmarks are and how to exercise them. The harness is the foundation that makes autoloop experimentation trustworthy and that incidentally patches the thin-binder problem across the portfolio.
 
