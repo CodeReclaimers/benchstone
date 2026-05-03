@@ -7,7 +7,8 @@ import click
 
 from . import __version__, background, jobs, paths, references
 from ._timefmt import utc_now
-from .gate import ALL_VERDICT_KINDS, Verdict, evaluate as gate_evaluate
+from .api import compute_verdict
+from .gate import ALL_VERDICT_KINDS, Verdict
 from .manifest import Benchmark, ManifestError, Project, load as load_manifest
 from .provenance import GitState, ProvenanceError, git_state
 from .references import ReferenceError
@@ -280,7 +281,16 @@ def _annotate_notes(notes: str | None, at_sha: str) -> str:
 def evaluate(
     project_name: str, benchmark_name: str, expect: str | None
 ) -> None:
-    """Compare runs at the current SHA against the recorded baseline. Read-only."""
+    """Compare runs at the current SHA against the recorded baseline. Read-only.
+
+    \b
+    Exit codes:
+      0  PROMOTE / PASS                          (forward signal)
+      1  REJECT  / FAIL                          (reverse signal)
+      2  NEEDS_MORE_DATA / NO_BASELINE / NO_REFERENCE   (inconclusive)
+      3  unknown verdict kind                    (defensive fallback)
+      4  --expect MISMATCH                       (only with --expect)
+    """
     project_path, project, benchmark = _resolve(project_name, benchmark_name)
     gstate = _require_git_state(project_path)
     if expect is not None and expect not in ALL_VERDICT_KINDS:
@@ -288,7 +298,7 @@ def evaluate(
             f"--expect must be one of {sorted(ALL_VERDICT_KINDS)}, got {expect!r}"
         )
     with Store(paths.store_path()) as store:
-        verdict = _compute_verdict(project, benchmark, project_path, gstate.sha, store)
+        verdict = compute_verdict(project, benchmark, gstate.sha, store)
     _print_verdict(project, benchmark, gstate.sha, verdict)
     if expect is not None:
         if verdict.kind == expect:
@@ -325,7 +335,7 @@ def promote(
     project_path, project, benchmark = _resolve(project_name, benchmark_name)
     gstate = _require_git_state(project_path)
     with Store(paths.store_path()) as store:
-        verdict = _compute_verdict(project, benchmark, project_path, gstate.sha, store)
+        verdict = compute_verdict(project, benchmark, gstate.sha, store)
         _print_verdict(project, benchmark, gstate.sha, verdict)
         if verdict.kind != "PROMOTE" and not force:
             raise click.ClickException(
@@ -686,34 +696,6 @@ def _resolve_artifact_run(
         return with_artifact[-1]
 
 
-def _compute_verdict(
-    project: Project,
-    benchmark: Benchmark,
-    project_path: Path,
-    current_sha: str,
-    store: Store,
-) -> Verdict:
-    if benchmark.tier == "correctness":
-        reference = references.get(project.name, benchmark.name)
-        candidate_runs = store.fetch_candidate_runs(
-            project.name, benchmark.name, current_sha
-        )
-        return gate_evaluate(
-            benchmark, None, [], candidate_runs, reference=reference
-        )
-    baseline_row = store.get_baseline(project.name, benchmark.name)
-    if baseline_row is None:
-        return gate_evaluate(benchmark, None, [], [])
-    baseline_runs = store.fetch_baseline_runs(
-        project.name, benchmark.name, baseline_row.git_sha,
-        meta_seed=baseline_row.meta_seed,
-    )
-    candidate_runs = store.fetch_candidate_runs(
-        project.name, benchmark.name, current_sha
-    )
-    return gate_evaluate(benchmark, baseline_row, baseline_runs, candidate_runs)
-
-
 BASELINE_CV_WARN = 0.05  # SE/|mean| above this triggers a fragility hint.
 
 
@@ -762,16 +744,26 @@ def _cv(mean: float | None, se: float | None) -> float:
     return abs(se / mean)
 
 
+# Exit-code contract for `bench evaluate`. Consumer scripts (autoloops, CI
+# steps) branch on the exit code. The mapping is part of the CLI contract:
+#   0 = forward signal (PROMOTE / PASS)
+#   1 = reverse signal (REJECT / FAIL)
+#   2 = inconclusive (NEEDS_MORE_DATA / NO_BASELINE / NO_REFERENCE)
+#   3 = unknown verdict kind (defensive fallback)
+#   4 = --expect MISMATCH (raised inline; not in this map)
+VERDICT_EXIT_CODES: dict[str, int] = {
+    "PROMOTE": 0,
+    "PASS": 0,
+    "REJECT": 1,
+    "FAIL": 1,
+    "NEEDS_MORE_DATA": 2,
+    "NO_BASELINE": 2,
+    "NO_REFERENCE": 2,
+}
+
+
 def _verdict_exit_code(v: Verdict) -> int:
-    return {
-        "PROMOTE": 0,
-        "PASS": 0,
-        "REJECT": 1,
-        "FAIL": 1,
-        "NEEDS_MORE_DATA": 2,
-        "NO_BASELINE": 2,
-        "NO_REFERENCE": 2,
-    }.get(v.kind, 3)
+    return VERDICT_EXIT_CODES.get(v.kind, 3)
 
 
 def _summarize_runs(store: Store, ids: list[int], plan: RunPlan) -> None:

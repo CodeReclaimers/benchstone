@@ -183,6 +183,24 @@ def _parse_benchmark(entry: dict, idx: int) -> Benchmark:
     if repetitions < 1:
         raise ManifestError(f"benchmarks[{idx}].repetitions must be >= 1")
 
+    if not is_correctness and repetitions < 2:
+        warnings.warn(
+            f"manifest: benchmarks[{idx}] sets repetitions={repetitions} on a "
+            f"tier={tier!r} benchmark; the gate requires at least 2 candidate "
+            f"runs (max(repetitions, 2)) and will return NEEDS_MORE_DATA "
+            f"forever. Raise repetitions to >= 2 in the manifest.",
+            stacklevel=4,
+        )
+    if not is_correctness and len(baseline_seeds) < 2:
+        warnings.warn(
+            f"manifest: benchmarks[{idx}] declares {len(baseline_seeds)} "
+            f"baseline_seed(s) on a tier={tier!r} benchmark; the gate requires "
+            f"at least 2 baseline runs (max(len(baseline_seeds), 2)) and will "
+            f"return NEEDS_MORE_DATA forever. Add baseline_seeds entries until "
+            f"there are at least 2.",
+            stacklevel=4,
+        )
+
     deterministic_default = is_correctness
     deterministic = bool(entry.get("deterministic", deterministic_default))
 

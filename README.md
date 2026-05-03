@@ -38,22 +38,142 @@ $ bench baseline establish Arborist nsga2_binpack_mean_fitness
 dispatched 5 run(s)  git_sha=a1b2c3d4ef  dirty=False  meta_seed=None
   run=1 rep=0 seed=1 metric=1.054 wall=1042.3s
   ... (5 reps) ...
-baseline set: Arborist/nsga2_binpack_mean_fitness @ a1b2c3d4ef
+baseline set: Arborist/nsga2_binpack_mean_fitness -> a1b2c3d4ef (5 run(s))
 
 # Make a code change. Run the candidate set against the same SHA-aware gate.
-$ bench evaluate Arborist nsga2_binpack_mean_fitness
+# bench run dispatches the work; bench evaluate is a separate, read-only step
+# that reports the verdict — and ends the process with an exit code that
+# encodes it (see "Consumer wiring" below).
+$ bench run Arborist nsga2_binpack_mean_fitness
 dispatched 5 run(s)  git_sha=9a8b7c6d  dirty=False  meta_seed=4427...
   run=6 rep=0 seed=...  metric=1.041  wall=1031.1s
   ... (5 reps) ...
+
+$ bench evaluate Arborist nsga2_binpack_mean_fitness
 verdict: PROMOTE  mann_whitney z=+2.61 >= threshold 2.0 (direction=minimize)
   baseline mean=1.0527  candidate mean=1.0413
 
-# Move the baseline pointer if the gate passed.
+# Move the baseline pointer if the gate passed. The candidate run set's
+# meta_seed is recorded on the pointer, so the next bench evaluate at the
+# new SHA reads those runs as baseline — no separate `baseline establish`
+# is needed at the new SHA.
 $ bench promote Arborist nsga2_binpack_mean_fitness
-baseline updated: Arborist/nsga2_binpack_mean_fitness  a1b2c3d4ef -> 9a8b7c6d
+baseline promoted: Arborist/nsga2_binpack_mean_fitness -> 9a8b7c6d  (baseline meta_seed=4427...)
 ```
 
-A consumer script (an autoloop, a CI step, etc.) reads the verdict line — `PROMOTE`, `REJECT`, `NEEDS_MORE_DATA`, or `NO_BASELINE` — and acts. There is no dashboard to interpret.
+A consumer script (an autoloop, a CI step, etc.) branches on the exit code from `bench evaluate` (or calls `benchstone.api.evaluate(...)` directly — see below). There is no dashboard to interpret.
+
+## Authoring a benchmark
+
+The harness invokes the project as a subprocess. The contract is a small JSON-over-files protocol; the canonical schema lives in [`benchstone/protocol.py`](benchstone/protocol.py).
+
+### Manifest
+
+Each project has a `bench/manifest.toml` at its root. `bench register PATH` reads `PATH/bench/manifest.toml`. The manifest declares the project's invocation template and one or more benchmarks; see [`tests/fixtures/fake_project/bench/manifest.toml`](tests/fixtures/fake_project/bench/manifest.toml) for a working example.
+
+For stochastic-tier benchmarks (`tier = "performance"` or `"quality"`), `repetitions` and `len(baseline_seeds)` must each be at least 2 — the gate's per-side floor. The manifest loader warns at load time if either is below 2; with one or zero, the gate returns `NEEDS_MORE_DATA` forever.
+
+### Invocation template
+
+`project.invocation` is a string with the placeholders `{entry_point}`, `{config_path}`, and `{output_path}`. It is executed via `subprocess.run(..., shell=True)` so shell pipelines, redirects, and env-var expansion work naturally. **Manifests are trusted code** (see [Security model](#security-model)).
+
+```toml
+invocation = "python bench/runner.py --entry={entry_point} --config={config_path} --output={output_path}"
+```
+
+### Subprocess protocol
+
+The harness writes an `InvocationConfig` JSON object to `{config_path}` before launch:
+
+```json
+{
+  "benchmark":         "fake_quality",
+  "seed":              42,
+  "corpus_path":       "/abs/path/to/corpus",
+  "repetition_index":  0,
+  "repetition_total":  5,
+  "artifact_path":     "/abs/path/artifact.bin"
+}
+```
+
+`artifact_path` is non-null only for correctness-tier benchmarks; non-correctness runners should ignore it. `corpus_path` is the empty string when the manifest does not declare one.
+
+The runner does its work and writes a `ProjectResult` to `{output_path}`:
+
+```json
+{
+  "status":              "ok",
+  "metric":              1.0413,
+  "metric_components":   {"...": "..."},
+  "wall_clock_seconds":  1031.1,
+  "metadata":            {"...": "..."},
+  "message":             null
+}
+```
+
+`status` is `"ok"` or `"error"`. `"ok"` requires a non-null `metric`; `"error"` requires a non-empty `message`. The other fields are optional.
+
+For correctness benchmarks the runner must additionally write byte content to `artifact_path` — the harness sha256s those bytes and treats the digest as the verdict input. **Output must be byte-deterministic** (sort dict keys, write a single trailing newline, etc.); a content-hash gate is unforgiving about whitespace and ordering.
+
+A minimal Python runner:
+
+```python
+# bench/runner.py
+import argparse, json
+from pathlib import Path
+
+p = argparse.ArgumentParser()
+p.add_argument("--entry"); p.add_argument("--config"); p.add_argument("--output")
+args = p.parse_args()
+
+cfg = json.loads(Path(args.config).read_text())
+metric = run_benchmark(cfg["benchmark"], cfg["seed"], cfg["corpus_path"])
+Path(args.output).write_text(json.dumps({"status": "ok", "metric": metric},
+                                        sort_keys=True))
+```
+
+### Dirty-tree default
+
+`bench run` and `bench baseline establish` refuse to operate on a dirty git tree by default. Pass `--allow-dirty` to override; the diff is persisted at `0o600` under `$BENCHSTONE_HOME/logs/<project>/<benchmark>/` and recorded with the run row. Dirty-row gating is currently the same as clean rows — see [Limits](#limits-worth-being-explicit-about).
+
+### Promote semantics
+
+`bench promote` records the candidate run set's meta_seed on the baseline pointer, so the next `bench evaluate` at the new SHA reads the promoted runs as baseline. No separate `bench baseline establish` is needed at the new SHA. If two `bench evaluate` invocations have run at the same SHA (two distinct meta_seeds), promote refuses to choose silently; pass `--meta-seed N` to disambiguate.
+
+### Setup gotchas
+
+- **The corpus must exist before `bench register`.** Registration loads the manifest and verifies any declared `corpus_hash` against the on-disk content. If your runner generates the corpus, run the generator first.
+- **`bench freeze-reference` needs an artifact at the current SHA.** Run the benchmark once (`bench run`) so the harness has bytes to freeze, then freeze.
+
+## Consumer wiring
+
+### `bench evaluate` exit codes
+
+| Exit | Verdict kinds |
+|------|---------------|
+| 0    | `PROMOTE`, `PASS` |
+| 1    | `REJECT`, `FAIL` |
+| 2    | `NEEDS_MORE_DATA`, `NO_BASELINE`, `NO_REFERENCE` |
+| 3    | unknown verdict kind (defensive fallback) |
+| 4    | `--expect MISMATCH` (only when `--expect` is passed) |
+
+The same mapping is exposed as `benchstone.cli.VERDICT_EXIT_CODES`.
+
+### Python API
+
+For consumer scripts that don't want to shell out, two read-only entry points:
+
+```python
+from benchstone.api import evaluate, history
+
+verdict = evaluate("Arborist", "nsga2_binpack_mean_fitness")
+if verdict.kind == "PROMOTE":
+    ...
+
+rows = history("Arborist", "nsga2_binpack_mean_fitness", limit=20)
+```
+
+`evaluate` returns a `Verdict`; `history` returns a list of `Run`. Configuration errors (project not registered, manifest invalid, benchmark name unknown, no git state) raise their native exceptions; gate outcomes — including "no baseline yet" or "not enough runs" — come back as `Verdict` objects with the corresponding `kind`.
 
 ## How it differs from other benchmark tools
 
