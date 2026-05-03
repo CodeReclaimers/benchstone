@@ -305,10 +305,23 @@ def evaluate(
 @click.option("--force", is_flag=True, default=False,
               help="Promote even if the current verdict is not PROMOTE.")
 @click.option("--notes", default=None)
+@click.option("--meta-seed", "meta_seed", type=int, default=None,
+              help="When the candidate SHA has runs from multiple `bench evaluate` "
+                   "invocations (multiple meta_seeds), select which group becomes the "
+                   "new baseline. Required only when the choice is ambiguous.")
 def promote(
-    project_name: str, benchmark_name: str, force: bool, notes: str | None
+    project_name: str,
+    benchmark_name: str,
+    force: bool,
+    notes: str | None,
+    meta_seed: int | None,
 ) -> None:
-    """Update the baseline pointer to the current SHA if the verdict is PROMOTE."""
+    """Update the baseline pointer to the current SHA if the verdict is PROMOTE.
+
+    Records the candidate run set's meta_seed on the baseline pointer so the
+    next `bench evaluate` reads the same runs that justified the promotion;
+    no separate `bench baseline establish` is needed at the new SHA.
+    """
     project_path, project, benchmark = _resolve(project_name, benchmark_name)
     gstate = _require_git_state(project_path)
     with Store(paths.store_path()) as store:
@@ -318,8 +331,63 @@ def promote(
             raise click.ClickException(
                 f"refusing to promote: verdict is {verdict.kind} (pass --force to override)"
             )
-        store.set_baseline(project.name, benchmark.name, gstate.sha, utc_now(), notes)
-    click.echo(f"baseline promoted: {project.name}/{benchmark.name} -> {gstate.sha[:10]}")
+        chosen_meta_seed = _resolve_promote_meta_seed(
+            project, benchmark, gstate.sha, store, meta_seed,
+        )
+        store.set_baseline(
+            project.name, benchmark.name, gstate.sha, utc_now(),
+            notes=notes, meta_seed=chosen_meta_seed,
+        )
+    suffix = (
+        f"  (baseline meta_seed={chosen_meta_seed})"
+        if chosen_meta_seed is not None else ""
+    )
+    click.echo(
+        f"baseline promoted: {project.name}/{benchmark.name} -> "
+        f"{gstate.sha[:10]}{suffix}"
+    )
+
+
+def _resolve_promote_meta_seed(
+    project: Project,
+    benchmark: Benchmark,
+    sha: str,
+    store: Store,
+    explicit: int | None,
+) -> int | None:
+    """Pick which meta_seed group at ``sha`` becomes the new baseline.
+
+    For correctness benchmarks the gate doesn't read meta_seeded baseline
+    distributions, so this returns None unconditionally — the pointer just
+    moves to the new SHA.
+
+    For stochastic benchmarks: if --meta-seed was given, validate it exists
+    at the SHA. Otherwise look at the distinct candidate meta_seeds and refuse
+    if there is more than one (ambiguous choice).
+    """
+    if benchmark.tier == "correctness":
+        return None
+    available = store.distinct_candidate_meta_seeds(
+        project.name, benchmark.name, sha
+    )
+    if explicit is not None:
+        if explicit not in available:
+            raise click.ClickException(
+                f"--meta-seed {explicit} not found among candidate runs at "
+                f"{sha[:10]} (available: {available or 'none'})"
+            )
+        return explicit
+    if len(available) == 0:
+        # No candidate runs at all (e.g. --force on NO_BASELINE without any
+        # `bench run` first). Pointer moves but no baseline runs back it.
+        return None
+    if len(available) > 1:
+        raise click.ClickException(
+            f"refusing to promote: candidate runs at {sha[:10]} cover multiple "
+            f"meta_seeds ({available}); pass --meta-seed N to choose which group "
+            f"becomes the new baseline"
+        )
+    return available[0]
 
 
 @main.command("freeze-reference")
@@ -415,15 +483,28 @@ def history_cmd(
         click.echo("(no runs match)")
         return
     baseline_sha = baseline_row.git_sha if baseline_row is not None else None
+    baseline_meta_seed = baseline_row.meta_seed if baseline_row is not None else None
     if baseline_sha:
-        click.echo(f"# baseline @ {baseline_sha[:10]}")
+        suffix = (
+            f"  meta_seed={baseline_meta_seed}"
+            if baseline_meta_seed is not None else ""
+        )
+        click.echo(f"# baseline @ {baseline_sha[:10]}{suffix}")
 
     for r in runs:
         metric_str = f"metric={r.metric:.6f}" if r.metric is not None else "metric=-"
         meta_tag = "baseline" if r.meta_seed is None else f"meta={r.meta_seed}"
         artifact = f"  artifact={r.artifact_hash[:18]}..." if r.artifact_hash else ""
         dirty = "  DIRTY" if r.git_dirty else ""
-        marker = "  *" if baseline_sha and r.git_sha == baseline_sha else "   "
+        # Mark only runs the gate currently treats as baseline: same SHA AND
+        # same meta_seed group as the pointer. A run sharing the SHA but with
+        # a different meta_seed is historical, not active baseline.
+        is_active_baseline = (
+            baseline_sha is not None
+            and r.git_sha == baseline_sha
+            and r.meta_seed == baseline_meta_seed
+        )
+        marker = "  *" if is_active_baseline else "   "
         click.echo(
             f"{r.timestamp}{marker}run={r.id}  sha={r.git_sha[:10]}  "
             f"seed={r.seed}  {meta_tag}  rep={r.repetition_index}  "
@@ -553,7 +634,8 @@ def _dispatch(
                 if set_baseline:
                     store.set_baseline(
                         project.name, benchmark.name, plan.git_state.sha,
-                        utc_now(), baseline_notes,
+                        utc_now(), notes=baseline_notes,
+                        meta_seed=plan.meta_seed,
                     )
         except RunnerError as exc:
             raise click.ClickException(str(exc))
@@ -623,7 +705,8 @@ def _compute_verdict(
     if baseline_row is None:
         return gate_evaluate(benchmark, None, [], [])
     baseline_runs = store.fetch_baseline_runs(
-        project.name, benchmark.name, baseline_row.git_sha
+        project.name, benchmark.name, baseline_row.git_sha,
+        meta_seed=baseline_row.meta_seed,
     )
     candidate_runs = store.fetch_candidate_runs(
         project.name, benchmark.name, current_sha

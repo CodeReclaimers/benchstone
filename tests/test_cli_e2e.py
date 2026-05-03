@@ -643,6 +643,8 @@ def test_promote_force_moves_pointer(
     with Store(bs_paths.store_path()) as store:
         base_before = store.get_baseline("FakeProject", "fake_quality")
     assert base_before is not None
+    # Pre-promote pointer was set by `baseline establish` → meta_seed=NULL.
+    assert base_before.meta_seed is None
 
     r = runner.invoke(
         main,
@@ -650,10 +652,143 @@ def test_promote_force_moves_pointer(
     )
     assert r.exit_code == 0, r.output
     assert "baseline promoted" in r.output
+    assert "baseline meta_seed=42" in r.output
 
     with Store(bs_paths.store_path()) as store:
         base_after = store.get_baseline("FakeProject", "fake_quality")
     assert base_after is not None
     assert base_after.notes == "forced"
-    # Same SHA (no commit moved) but timestamp/notes updated.
+    # Same SHA (no commit moved) but timestamp/notes updated, and the pointer
+    # now records the candidate run set's meta_seed so the next `bench evaluate`
+    # sees the promoted runs as baseline.
     assert base_after.established_at >= base_before.established_at
+    assert base_after.meta_seed == 42
+
+
+def _git_commit_whitespace(repo: Path, marker: str) -> str:
+    """Make a trivial commit in ``repo`` and return the resulting HEAD SHA."""
+    import subprocess
+
+    (repo / "WHITESPACE").write_text(marker + "\n")
+    subprocess.run(["git", "add", "WHITESPACE"], cwd=repo, check=True,
+                   capture_output=True)
+    subprocess.run(["git", "commit", "-q", "-m", f"whitespace {marker}"],
+                   cwd=repo, check=True, capture_output=True)
+    out = subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo, check=True,
+                         capture_output=True, text=True)
+    return out.stdout.strip()
+
+
+def test_promote_then_evaluate_does_not_need_more_data(
+    fake_project_git: Path, isolated_home: Path
+) -> None:
+    """Regression: pre-fix, `bench promote` moved the pointer to a SHA with no
+    meta_seed=NULL runs, so the next `bench evaluate` returned NEEDS_MORE_DATA
+    until the user re-ran `baseline establish`. With the meta_seed-on-pointer
+    fix, the promoted candidate runs become the baseline at the new SHA and
+    evaluate returns a real verdict immediately."""
+    runner = CliRunner()
+    runner.invoke(main, ["register", str(fake_project_git)])
+    runner.invoke(main, ["baseline", "establish", "FakeProject", "fake_quality"])
+
+    # Move HEAD to a new SHA, then run a candidate set there.
+    new_sha = _git_commit_whitespace(fake_project_git, "promote-roundtrip")
+    runner.invoke(
+        main, ["run", "FakeProject", "fake_quality",
+               "--seed-set", "fresh", "--meta-seed", "77"],
+    )
+
+    # Force-promote (the candidate metrics are worse than baseline, so the
+    # gate would say REJECT — but that's irrelevant; we want to test the
+    # *pointer* behavior, not the gate decision).
+    rp = runner.invoke(
+        main,
+        ["promote", "FakeProject", "fake_quality", "--force", "--notes", "rp"],
+    )
+    assert rp.exit_code == 0, rp.output
+    assert f"-> {new_sha[:10]}" in rp.output
+    assert "baseline meta_seed=77" in rp.output
+
+    # Next evaluate must NOT return NEEDS_MORE_DATA: the promoted candidate
+    # group is now visible as the baseline set at the new SHA.
+    re = runner.invoke(main, ["evaluate", "FakeProject", "fake_quality"])
+    assert "NEEDS_MORE_DATA" not in re.output, re.output
+    # Baseline is the promoted set (meta_seed=77, 3 runs) and the candidate
+    # set at this SHA is the same group, so the gate runs to a verdict
+    # (sigma == 0 → REJECT). The point is it produced a verdict, not which.
+    assert re.exit_code in (0, 1), re.output
+
+
+def test_promote_refuses_on_multiple_candidate_meta_seeds(
+    fake_project_git: Path, isolated_home: Path
+) -> None:
+    """Two `bench evaluate` invocations at the same SHA produce two distinct
+    meta_seed groups. promote refuses to silently choose between them."""
+    runner = CliRunner()
+    runner.invoke(main, ["register", str(fake_project_git)])
+    runner.invoke(main, ["baseline", "establish", "FakeProject", "fake_quality"])
+    runner.invoke(
+        main, ["run", "FakeProject", "fake_quality",
+               "--seed-set", "fresh", "--meta-seed", "100"],
+    )
+    runner.invoke(
+        main, ["run", "FakeProject", "fake_quality",
+               "--seed-set", "fresh", "--meta-seed", "200"],
+    )
+
+    r = runner.invoke(
+        main,
+        ["promote", "FakeProject", "fake_quality", "--force", "--notes", "ambig"],
+    )
+    assert r.exit_code != 0
+    assert "multiple meta_seeds" in r.output
+    assert "[100, 200]" in r.output
+
+
+def test_promote_with_explicit_meta_seed_chooses_group(
+    fake_project_git: Path, isolated_home: Path
+) -> None:
+    """When the user disambiguates with --meta-seed, that group becomes baseline."""
+    runner = CliRunner()
+    runner.invoke(main, ["register", str(fake_project_git)])
+    runner.invoke(main, ["baseline", "establish", "FakeProject", "fake_quality"])
+    runner.invoke(
+        main, ["run", "FakeProject", "fake_quality",
+               "--seed-set", "fresh", "--meta-seed", "100"],
+    )
+    runner.invoke(
+        main, ["run", "FakeProject", "fake_quality",
+               "--seed-set", "fresh", "--meta-seed", "200"],
+    )
+
+    r = runner.invoke(
+        main,
+        ["promote", "FakeProject", "fake_quality",
+         "--force", "--meta-seed", "100", "--notes", "explicit"],
+    )
+    assert r.exit_code == 0, r.output
+    assert "baseline meta_seed=100" in r.output
+
+    with Store(bs_paths.store_path()) as store:
+        base = store.get_baseline("FakeProject", "fake_quality")
+    assert base is not None
+    assert base.meta_seed == 100
+
+
+def test_promote_with_unknown_meta_seed_fails(
+    fake_project_git: Path, isolated_home: Path
+) -> None:
+    runner = CliRunner()
+    runner.invoke(main, ["register", str(fake_project_git)])
+    runner.invoke(main, ["baseline", "establish", "FakeProject", "fake_quality"])
+    runner.invoke(
+        main, ["run", "FakeProject", "fake_quality",
+               "--seed-set", "fresh", "--meta-seed", "100"],
+    )
+    r = runner.invoke(
+        main,
+        ["promote", "FakeProject", "fake_quality",
+         "--force", "--meta-seed", "999"],
+    )
+    assert r.exit_code != 0
+    assert "--meta-seed 999 not found" in r.output

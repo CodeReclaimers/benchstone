@@ -58,6 +58,7 @@ def main(argv: list[str] | None = None) -> int:
                         plan.git_state.sha,
                         utc_now(),
                         notes=spec.get("baseline_notes"),
+                        meta_seed=plan.meta_seed,
                     )
         _finalize(job_id, status="done", inserted_run_ids=ids)
         return 0

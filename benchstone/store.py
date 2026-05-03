@@ -41,13 +41,17 @@ CREATE TABLE IF NOT EXISTS baselines (
   git_sha TEXT NOT NULL,
   established_at TEXT NOT NULL,
   notes TEXT,
+  meta_seed INTEGER,
   PRIMARY KEY (project, benchmark)
 );
 """
 
-_MIGRATIONS: tuple[tuple[str, str], ...] = (
-    ("artifact_hash", "ALTER TABLE runs ADD COLUMN artifact_hash TEXT"),
-    ("artifact_path", "ALTER TABLE runs ADD COLUMN artifact_path TEXT"),
+# (table, column_name, ALTER statement). Applied if the column is missing from
+# the table — `CREATE TABLE IF NOT EXISTS` doesn't add columns to existing tables.
+_MIGRATIONS: tuple[tuple[str, str, str], ...] = (
+    ("runs", "artifact_hash", "ALTER TABLE runs ADD COLUMN artifact_hash TEXT"),
+    ("runs", "artifact_path", "ALTER TABLE runs ADD COLUMN artifact_path TEXT"),
+    ("baselines", "meta_seed", "ALTER TABLE baselines ADD COLUMN meta_seed INTEGER"),
 )
 
 _RUN_COLUMNS: tuple[str, ...] = (
@@ -65,6 +69,12 @@ class Baseline:
     git_sha: str
     established_at: str
     notes: str | None
+    # NULL when the baseline came from `bench baseline establish` (the manifest's
+    # explicit baseline_seeds, which record meta_seed=NULL on the runs).
+    # Non-NULL when the baseline came from `bench promote`: the meta_seed of the
+    # candidate run set that justified the promotion. fetch_baseline_runs uses
+    # this to select the runs that count as baseline at the pointer's SHA.
+    meta_seed: int | None = None
 
 
 @dataclass(frozen=True)
@@ -110,10 +120,16 @@ class Store:
         self._in_txn: int = 0
 
     def _apply_migrations(self) -> None:
-        existing = {row[1] for row in self._conn.execute("PRAGMA table_info(runs)").fetchall()}
-        for column_name, sql in _MIGRATIONS:
-            if column_name not in existing:
+        existing: dict[str, set[str]] = {}
+        for table, column_name, sql in _MIGRATIONS:
+            if table not in existing:
+                existing[table] = {
+                    row[1] for row in
+                    self._conn.execute(f"PRAGMA table_info({table})").fetchall()
+                }
+            if column_name not in existing[table]:
                 self._conn.execute(sql)
+                existing[table].add(column_name)
 
     def close(self) -> None:
         self._conn.close()
@@ -203,33 +219,84 @@ class Store:
         return [_row_to_run(r) for r in cur.fetchall()]
 
     def fetch_baseline_runs(
-        self, project: str, benchmark: str, git_sha: str
+        self,
+        project: str,
+        benchmark: str,
+        git_sha: str,
+        meta_seed: int | None = None,
     ) -> list[Run]:
-        """Runs with ``meta_seed IS NULL`` at the given SHA — the baseline seed set.
+        """Runs at the given SHA that count as baseline.
 
-        The baseline runner uses the manifest's explicit ``baseline_seeds`` and
-        records ``meta_seed=NULL``; evaluation runs derive seeds from a meta-seed
-        and record it. This lets the gate distinguish the two sets even when
-        the baseline and candidate share a git SHA (e.g., a sanity-check eval
-        against the current head before any change has been made).
+        ``meta_seed=None`` selects runs with ``meta_seed IS NULL`` — the seed
+        set produced by ``bench baseline establish`` from the manifest's
+        explicit ``baseline_seeds``. A non-None ``meta_seed`` selects runs with
+        exactly that meta_seed value — the seed set produced by an evaluation
+        that was later promoted (``bench promote``).
+
+        The baseline pointer (see ``Baseline.meta_seed``) records which value
+        to pass here, so the gate sees the same set the user promoted.
         """
-        cur = self._conn.execute(
-            "SELECT * FROM runs WHERE project=? AND benchmark=? "
-            "AND git_sha=? AND meta_seed IS NULL ORDER BY id",
-            (project, benchmark, git_sha),
-        )
+        if meta_seed is None:
+            cur = self._conn.execute(
+                "SELECT * FROM runs WHERE project=? AND benchmark=? "
+                "AND git_sha=? AND meta_seed IS NULL ORDER BY id",
+                (project, benchmark, git_sha),
+            )
+        else:
+            cur = self._conn.execute(
+                "SELECT * FROM runs WHERE project=? AND benchmark=? "
+                "AND git_sha=? AND meta_seed=? ORDER BY id",
+                (project, benchmark, git_sha, meta_seed),
+            )
         return [_row_to_run(r) for r in cur.fetchall()]
 
     def fetch_candidate_runs(
-        self, project: str, benchmark: str, git_sha: str
+        self,
+        project: str,
+        benchmark: str,
+        git_sha: str,
+        meta_seed: int | None = None,
     ) -> list[Run]:
-        """Runs with ``meta_seed IS NOT NULL`` at the given SHA — fresh-seed evaluations."""
+        """Candidate (meta-seeded) runs at the given SHA.
+
+        Default behavior (``meta_seed=None``) returns runs from the most
+        recently inserted meta_seed group at this SHA — i.e., the latest
+        ``bench evaluate`` invocation. This avoids silently mixing distributions
+        from separate evaluations that happen to share a SHA. Callers that want
+        a specific group pass ``meta_seed=N``.
+        """
+        if meta_seed is None:
+            row = self._conn.execute(
+                "SELECT meta_seed FROM runs WHERE project=? AND benchmark=? "
+                "AND git_sha=? AND meta_seed IS NOT NULL "
+                "ORDER BY id DESC LIMIT 1",
+                (project, benchmark, git_sha),
+            ).fetchone()
+            if row is None:
+                return []
+            meta_seed = int(row["meta_seed"])
         cur = self._conn.execute(
             "SELECT * FROM runs WHERE project=? AND benchmark=? "
-            "AND git_sha=? AND meta_seed IS NOT NULL ORDER BY id",
-            (project, benchmark, git_sha),
+            "AND git_sha=? AND meta_seed=? ORDER BY id",
+            (project, benchmark, git_sha, meta_seed),
         )
         return [_row_to_run(r) for r in cur.fetchall()]
+
+    def distinct_candidate_meta_seeds(
+        self, project: str, benchmark: str, git_sha: str
+    ) -> list[int]:
+        """All distinct meta_seed values for candidate runs at the given SHA.
+
+        ``bench promote`` uses this to detect ambiguity: two separate ``bench
+        evaluate`` invocations at the same SHA produce two distinct meta_seed
+        groups, and promote refuses to pick silently.
+        """
+        cur = self._conn.execute(
+            "SELECT DISTINCT meta_seed FROM runs WHERE project=? AND benchmark=? "
+            "AND git_sha=? AND meta_seed IS NOT NULL ORDER BY meta_seed",
+            (project, benchmark, git_sha),
+        )
+        return [int(r["meta_seed"]) for r in cur.fetchall()]
 
     def get_run(self, run_id: int) -> Run | None:
         cur = self._conn.execute("SELECT * FROM runs WHERE id=?", (run_id,))
@@ -247,17 +314,29 @@ class Store:
         git_sha: str,
         established_at: str,
         notes: str | None = None,
+        meta_seed: int | None = None,
     ) -> None:
+        """Move the baseline pointer to ``git_sha``.
+
+        ``meta_seed`` records which seed group at ``git_sha`` counts as
+        baseline. ``None`` (the default) is correct for ``bench baseline
+        establish`` runs (manifest's explicit baseline_seeds, recorded with
+        ``meta_seed=NULL``). For ``bench promote``, pass the candidate run
+        set's meta_seed so the next gate evaluation reads the same runs that
+        justified the promotion.
+        """
         self._conn.execute(
             """
-            INSERT INTO baselines (project, benchmark, git_sha, established_at, notes)
-            VALUES (?, ?, ?, ?, ?)
+            INSERT INTO baselines
+              (project, benchmark, git_sha, established_at, notes, meta_seed)
+            VALUES (?, ?, ?, ?, ?, ?)
             ON CONFLICT(project, benchmark) DO UPDATE SET
               git_sha=excluded.git_sha,
               established_at=excluded.established_at,
-              notes=excluded.notes
+              notes=excluded.notes,
+              meta_seed=excluded.meta_seed
             """,
-            (project, benchmark, git_sha, established_at, notes),
+            (project, benchmark, git_sha, established_at, notes, meta_seed),
         )
         if self._in_txn == 0:
             self._conn.commit()
@@ -317,6 +396,7 @@ def _row_to_baseline(row: sqlite3.Row) -> Baseline:
         git_sha=row["git_sha"],
         established_at=row["established_at"],
         notes=row["notes"],
+        meta_seed=row["meta_seed"],
     )
 
 
