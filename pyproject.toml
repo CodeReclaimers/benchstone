@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "benchstone"
-version = "0.1.1"
+version = "0.2.0"
 description = "Trustworthy benchmark gating for code-optimization loops: append-only results, harness-owned reference artifacts, statistical PROMOTE/REJECT verdicts."
 readme = "README.md"
 license = "MIT"

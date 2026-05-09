@@ -6,6 +6,21 @@ If you point Claude Code, an [OpenEvolve](https://github.com/algorithmicsuperint
 
 It also works without an agent in the loop. Anything that needs *"is this number meaningfully better than the last one?"* on a recurring basis benefits from a single place that knows the baseline for every benchmark across every project, refuses to run on a dirty git tree, pins the corpus, and never overwrites historical results.
 
+## Quick reference
+
+| What | Value |
+|---|---|
+| Manifest path | `<project_root>/bench/manifest.toml` |
+| Subprocess protocol | JSON-over-files: `InvocationConfig` in, `ProjectResult` out — see [Subprocess protocol](#subprocess-protocol) below |
+| `InvocationConfig` fields | `benchmark`, `seed`, `corpus_path`, `repetition_index`, `repetition_total`, `artifact_path` |
+| `ProjectResult` fields | `status` (`"ok"`/`"error"`), `metric`, `metric_components`, `wall_clock_seconds`, `metadata`, `message` |
+| Invocation template substitutions | `{entry_point}`, `{config_path}`, `{output_path}` (executed via `shell=True`) |
+| `bench evaluate` exit codes | 0 = `PROMOTE`/`PASS`, 1 = `REJECT`/`FAIL`, 2 = `NEEDS_MORE_DATA`/`NO_BASELINE`/`NO_REFERENCE`, 3 = unknown, 4 = `--expect` mismatch |
+| Gate sample-size floor | `len(baseline_runs) >= max(len(baseline_seeds), 2)` and `len(candidate_runs) >= max(repetitions, 2)` |
+| Mann-Whitney `\|z\|` ceiling | `sqrt(3 * n_b * n_c / (n_b + n_c + 1))` — set `promotion_z` below this |
+| State location | `$BENCHSTONE_HOME` (default `$XDG_DATA_HOME/benchstone` or `~/.local/share/benchstone`) |
+| Python API | `from benchstone.api import evaluate, history, run, establish_baseline, promote, freeze_reference, register` |
+
 ## Why now
 
 Agent-driven code modification is mainstream — Cursor, Claude Code, OpenEvolve, AIDE, Karpathy's autoresearch, internal autoloops at production companies. The 2025–2026 literature on agent evaluation has independently converged on a single observation: **the evaluator is the attack surface.** When the same agent writes both the code and the metric, the metric becomes a liability unless the evaluator and the reference data live somewhere the agent cannot reach.
@@ -65,7 +80,7 @@ A consumer script (an autoloop, a CI step, etc.) branches on the exit code from 
 
 ## Authoring a benchmark
 
-The harness invokes the project as a subprocess. The contract is a small JSON-over-files protocol; the canonical schema lives in [`benchstone/protocol.py`](benchstone/protocol.py).
+The harness invokes the project as a subprocess. The contract is a small JSON-over-files protocol; the canonical schema lives in [`benchstone/protocol.py`](benchstone/protocol.py). Three pieces fit together: the [Manifest](#manifest) declares the benchmark and the [Invocation template](#invocation-template); the [Subprocess protocol](#subprocess-protocol) defines the JSON config the harness writes and the JSON result the runner writes back.
 
 ### Manifest
 
