@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import math
 import tomllib
 import warnings
 from dataclasses import dataclass
@@ -42,6 +43,28 @@ class Project:
 
 @dataclass(frozen=True)
 class Benchmark:
+    """A single benchmark declared in the project manifest.
+
+    Field notes for the load-bearing stochastic-gate fields:
+
+    - ``repetitions``: candidate-side run count. Must be >= 1; the gate
+      enforces a per-side floor of ``max(repetitions, 2)`` and returns
+      NEEDS_MORE_DATA when fewer ok candidate runs exist.
+    - ``baseline_seeds``: baseline-side seed list. The gate enforces a
+      per-side floor of ``max(len(baseline_seeds), 2)``; values below 2
+      yield a perpetual NEEDS_MORE_DATA on stochastic tiers.
+    - ``promotion_sigma``: parametric difference-of-means z threshold; used
+      by ``gate_policy="sigma"`` (the default) and as a fallback when
+      ``gate_policy="mann_whitney"`` is set without an explicit
+      ``promotion_z``.
+    - ``promotion_z``: Mann-Whitney U z threshold. The achievable |z|
+      ceiling is ``sqrt(3 * n_b * n_c / (n_b + n_c + 1))`` with
+      ``n_b = max(len(baseline_seeds), 2)`` and
+      ``n_c = max(repetitions, 2)``; setting ``promotion_z`` above the
+      ceiling makes the gate physically unreachable. The manifest loader
+      warns at register time when the configured value exceeds the
+      ceiling.
+    """
     name: str
     entry_point: str
     tier: Tier
@@ -241,6 +264,28 @@ def _parse_benchmark(entry: dict, idx: int) -> Benchmark:
             f"Set promotion_z explicitly to silence this warning.",
             stacklevel=4,
         )
+    if (
+        gate_policy == "mann_whitney"
+        and promotion_z is not None
+        and not is_correctness
+    ):
+        # Mann-Whitney |z| is bounded by the rank-test sample-size ceiling.
+        # Use the gate's own per-side floor (max(_, 2)) for n_b and n_c so the
+        # ceiling we report matches the n the gate will actually see when it
+        # finally has enough runs to evaluate.
+        n_b = max(len(baseline_seeds), 2)
+        n_c = max(repetitions, 2)
+        z_max = math.sqrt(3 * n_b * n_c / (n_b + n_c + 1))
+        if promotion_z > z_max:
+            warnings.warn(
+                f"manifest: benchmarks[{idx}] sets promotion_z={promotion_z} "
+                f"with n_b={n_b}, n_c={n_c}; the Mann-Whitney |z| ceiling for "
+                f"these sample sizes is sqrt(3*n_b*n_c/(n_b+n_c+1)) "
+                f"~= {z_max:.3f}, so the gate cannot reach the threshold and "
+                f"will never PROMOTE. Lower promotion_z below the ceiling, or "
+                f"raise repetitions / baseline_seeds.",
+                stacklevel=4,
+            )
 
     return Benchmark(
         name=str(entry["name"]),

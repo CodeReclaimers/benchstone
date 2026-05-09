@@ -71,7 +71,7 @@ The harness invokes the project as a subprocess. The contract is a small JSON-ov
 
 Each project has a `bench/manifest.toml` at its root. `bench register PATH` reads `PATH/bench/manifest.toml`. The manifest declares the project's invocation template and one or more benchmarks; see [`tests/fixtures/fake_project/bench/manifest.toml`](tests/fixtures/fake_project/bench/manifest.toml) for a working example.
 
-For stochastic-tier benchmarks (`tier = "performance"` or `"quality"`), `repetitions` and `len(baseline_seeds)` must each be at least 2 — the gate's per-side floor. The manifest loader warns at load time if either is below 2; with one or zero, the gate returns `NEEDS_MORE_DATA` forever.
+For stochastic-tier benchmarks (`tier = "performance"` or `"quality"`), `repetitions` and `len(baseline_seeds)` must each be at least 2 — the gate's per-side floor. The manifest loader warns at load time if either is below 2; with one or zero, the gate returns `NEEDS_MORE_DATA` forever. See [Gate floors and ceilings](#gate-floors-and-ceilings) for the full reachability rules.
 
 ### Invocation template
 
@@ -158,6 +158,36 @@ Path(args.output).write_text(json.dumps({"status": "ok", "metric": metric},
 | 4    | `--expect MISMATCH` (only when `--expect` is passed) |
 
 The same mapping is exposed as `benchstone.cli.VERDICT_EXIT_CODES`.
+
+### Gate floors and ceilings
+
+Two reachability constraints are easy to trip over when authoring a manifest.
+
+**Sample-size floor.** The stochastic gate (performance/quality tiers) requires at least 2 runs per side regardless of what the manifest declares. With fewer, the verdict is always `NEEDS_MORE_DATA`:
+
+```
+len(baseline_runs)  >= max(len(baseline_seeds), 2)   # else NEEDS_MORE_DATA
+len(candidate_runs) >= max(repetitions, 2)           # else NEEDS_MORE_DATA
+```
+
+A manifest with `repetitions = 1` or `len(baseline_seeds) < 2` will warn at register time, but the symptom — a perpetual `NEEDS_MORE_DATA` verdict — is otherwise easy to misread as a missing-runs problem.
+
+**Mann-Whitney `promotion_z` ceiling.** The Mann-Whitney U test is rank-based, so |z| is bounded by the sample sizes alone:
+
+```
+|z|_max = sqrt(3 * n_b * n_c / (n_b + n_c + 1))
+```
+
+where `n_b = max(len(baseline_seeds), 2)` and `n_c = max(repetitions, 2)`. Setting `promotion_z` above this ceiling makes the gate *physically unreachable* — no candidate distribution can produce a z that high. Two common settings:
+
+| baseline_seeds | repetitions | `\|z\|_max` |
+|---:|---:|---:|
+| 2 | 2 | ≈ 1.549 |
+| 2 | 3 | ≈ 1.964 |
+| 5 | 5 | ≈ 2.611 |
+| 10 | 10 | ≈ 3.780 |
+
+The manifest loader warns at register time when `promotion_z` exceeds this ceiling for the configured sample sizes.
 
 ### Python API
 

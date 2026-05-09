@@ -247,8 +247,8 @@ def test_gate_policy_mann_whitney_parsed(tmp_path: Path) -> None:
         metric_direction = "minimize"
         promotion_sigma = 2.0
         promotion_z = 2.0
-        repetitions = 2
-        baseline_seeds = [1, 2]
+        repetitions = 5
+        baseline_seeds = [1, 2, 3, 4, 5]
         gate_policy = "mann_whitney"
     """)
     m = load(path)
@@ -369,6 +369,85 @@ def test_repetitions_one_does_not_warn_for_correctness_bench(tmp_path: Path) -> 
         entry_point = "b"
         tier = "correctness"
         repetitions = 1
+    """)
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")  # any warning becomes a failure
+        load(path)
+
+
+def test_promotion_z_above_ceiling_warns(tmp_path: Path) -> None:
+    """Mann-Whitney |z| is bounded by sample sizes; promotion_z above the
+    ceiling makes the gate physically unreachable and should warn."""
+    # n_b=2, n_c=2 -> |z|_max = sqrt(3*2*2/(2+2+1)) = sqrt(2.4) ~ 1.549.
+    # promotion_z=2.5 is above the ceiling.
+    path = _write(tmp_path, """
+        [project]
+        name = "p"
+        language = "python"
+        invocation = "true"
+
+        [[benchmarks]]
+        name = "b"
+        entry_point = "b"
+        tier = "quality"
+        metric_direction = "minimize"
+        promotion_sigma = 2.0
+        promotion_z = 2.5
+        repetitions = 2
+        baseline_seeds = [1, 2]
+        gate_policy = "mann_whitney"
+    """)
+    with pytest.warns(UserWarning, match="ceiling"):
+        load(path)
+
+
+def test_promotion_z_within_ceiling_does_not_warn(tmp_path: Path) -> None:
+    """promotion_z below the achievable Mann-Whitney |z| ceiling should not
+    trip the unreachable-threshold warning."""
+    # n_b=5, n_c=5 -> |z|_max = sqrt(3*25/11) ~ 2.611. promotion_z=2.0 fits.
+    path = _write(tmp_path, """
+        [project]
+        name = "p"
+        language = "python"
+        invocation = "true"
+
+        [[benchmarks]]
+        name = "b"
+        entry_point = "b"
+        tier = "quality"
+        metric_direction = "minimize"
+        promotion_sigma = 2.0
+        promotion_z = 2.0
+        repetitions = 5
+        baseline_seeds = [1, 2, 3, 4, 5]
+        gate_policy = "mann_whitney"
+    """)
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")  # any warning becomes a failure
+        load(path)
+
+
+def test_promotion_z_above_ceiling_does_not_warn_for_sigma_policy(tmp_path: Path) -> None:
+    """The unreachable-threshold warning is only relevant under
+    gate_policy='mann_whitney'; the sigma gate ignores promotion_z entirely."""
+    # promotion_z would be unreachable for n_b=2, n_c=2, but gate_policy='sigma'
+    # never consults it, so the warning would be misleading.
+    path = _write(tmp_path, """
+        [project]
+        name = "p"
+        language = "python"
+        invocation = "true"
+
+        [[benchmarks]]
+        name = "b"
+        entry_point = "b"
+        tier = "quality"
+        metric_direction = "minimize"
+        promotion_sigma = 2.0
+        promotion_z = 5.0
+        repetitions = 2
+        baseline_seeds = [1, 2]
+        gate_policy = "sigma"
     """)
     with warnings.catch_warnings():
         warnings.simplefilter("error")  # any warning becomes a failure
