@@ -191,19 +191,34 @@ The manifest loader warns at register time when `promotion_z` exceeds this ceili
 
 ### Python API
 
-For consumer scripts that don't want to shell out, two read-only entry points:
+For consumer scripts that don't want to shell out, `benchstone.api` exposes both read-only and write-side entry points:
 
 ```python
-from benchstone.api import evaluate, history
+from benchstone.api import (
+    evaluate, history,                              # read-only
+    register, run, establish_baseline, promote,     # write-side
+    freeze_reference,
+)
 
+# One-time setup (or after the manifest moves on disk).
+register("/path/to/Arborist.jl")
+
+# Establish or refresh a baseline.
+establish_baseline("Arborist", "nsga2_binpack_mean_fitness")
+
+# In an autoresearch loop: run a candidate, evaluate, promote on success.
+run("Arborist", "nsga2_binpack_mean_fitness", meta_seed=4427)
 verdict = evaluate("Arborist", "nsga2_binpack_mean_fitness")
 if verdict.kind == "PROMOTE":
-    ...
+    promote("Arborist", "nsga2_binpack_mean_fitness")
 
+# History query.
 rows = history("Arborist", "nsga2_binpack_mean_fitness", limit=20)
 ```
 
-`evaluate` returns a `Verdict`; `history` returns a list of `Run`. Configuration errors (project not registered, manifest invalid, benchmark name unknown, no git state) raise their native exceptions; gate outcomes — including "no baseline yet" or "not enough runs" — come back as `Verdict` objects with the corresponding `kind`.
+The write-side functions run benchmarks **synchronously in the foreground** — for background dispatch with PID tracking, use `bench run --background` from the CLI. Admission control (thread/GPU budget) still applies. `promote` raises `ValueError` if the verdict is not `PROMOTE` (pass `force=True` to override) or if multiple candidate `meta_seed` groups exist at the SHA (pass `meta_seed=N` to disambiguate). `freeze_reference` raises `ValueError` for non-correctness benchmarks and `ReferenceError` if a reference is already frozen.
+
+Configuration errors (project not registered, manifest invalid, benchmark name unknown, no git state) raise their native exceptions; gate outcomes — including "no baseline yet" or "not enough runs" — come back as `Verdict` objects with the corresponding `kind`.
 
 ## How it differs from other benchmark tools
 
