@@ -45,6 +45,40 @@ def test_list_filter_by_project(fake_project_path: Path, isolated_home: Path) ->
     assert "Nonexistent" in r.output
 
 
+def test_list_reports_corpus_state(
+    fake_project_path: Path, tmp_path: Path, isolated_home: Path
+) -> None:
+    """`bench list` surfaces corpus drift / missing / ok / n/a per benchmark
+    so the user can spot a stale corpus before wasting a run."""
+    import shutil
+
+    target = tmp_path / "DriftedFake"
+    shutil.copytree(fake_project_path, target)
+    runner = CliRunner()
+    runner.invoke(main, ["register", str(target)])
+    # Pristine corpus → fake_quality reports corpus=ok; fake_heavy/fake_correctness
+    # don't pin a corpus_hash → corpus=n/a.
+    r = runner.invoke(main, ["list"])
+    assert r.exit_code == 0, r.output
+    quality_line = next(
+        line for line in r.output.splitlines() if "fake_quality" in line
+    )
+    assert "corpus=ok" in quality_line
+    heavy_line = next(
+        line for line in r.output.splitlines() if "fake_heavy" in line
+    )
+    assert "corpus=n/a" in heavy_line
+
+    # Mutate the corpus and re-list.
+    (target / "bench" / "corpus" / "fake").write_bytes(b"drifted bytes")
+    r = runner.invoke(main, ["list"])
+    assert r.exit_code == 0, r.output
+    quality_line = next(
+        line for line in r.output.splitlines() if "fake_quality" in line
+    )
+    assert "corpus=drift" in quality_line
+
+
 def test_register_bad_manifest(tmp_path: Path, isolated_home: Path) -> None:
     bad = tmp_path / "bad_project"
     (bad / "bench").mkdir(parents=True)

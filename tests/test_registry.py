@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import shutil
+import warnings
 from pathlib import Path
 
 import pytest
@@ -50,8 +52,6 @@ def test_register_is_idempotent(fake_project_path: Path, isolated_home: Path) ->
 def test_register_reports_prior_path_on_move(
     fake_project_path: Path, tmp_path: Path, isolated_home: Path
 ) -> None:
-    import shutil
-
     reg = Registry()
     first = reg.register(fake_project_path)
     assert first.prior_path is None
@@ -63,6 +63,45 @@ def test_register_reports_prior_path_on_move(
     second = reg.register(moved)
     assert second.prior_path == fake_project_path.resolve()
     assert second.project.path == moved.resolve()
+
+
+def test_register_warns_on_corpus_drift(
+    fake_project_path: Path, tmp_path: Path, isolated_home: Path
+) -> None:
+    """Corpus drift caught at register time saves the user from finding out
+    only after a wasted run-time wall-clock budget."""
+    target = tmp_path / "DriftedProject"
+    shutil.copytree(fake_project_path, target)
+    # Mutate the corpus so its hash no longer matches the manifest's
+    # corpus_hash for fake_quality.
+    corpus_file = target / "bench" / "corpus" / "fake"
+    corpus_file.write_bytes(b"definitely not the original corpus")
+
+    with pytest.warns(UserWarning, match="corpus drift"):
+        Registry().register(target)
+
+
+def test_register_warns_on_missing_corpus(
+    fake_project_path: Path, tmp_path: Path, isolated_home: Path
+) -> None:
+    """Missing corpus surfaces at register time too — the run would otherwise
+    error after admission and dispatch."""
+    target = tmp_path / "MissingCorpusProject"
+    shutil.copytree(fake_project_path, target)
+    (target / "bench" / "corpus" / "fake").unlink()
+
+    with pytest.warns(UserWarning, match="corpus is missing"):
+        Registry().register(target)
+
+
+def test_register_does_not_warn_on_clean_corpus(
+    fake_project_path: Path, isolated_home: Path
+) -> None:
+    """A pristine fixture must not trip either corpus warning — that would
+    make the warnings useless noise."""
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        Registry().register(fake_project_path)
 
 
 def test_unregister_removes_entry(

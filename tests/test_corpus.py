@@ -5,7 +5,12 @@ from pathlib import Path
 
 import pytest
 
-from benchstone.corpus import SPEC_FILENAME, CorpusError, verify_corpus
+from benchstone.corpus import (
+    SPEC_FILENAME,
+    CorpusError,
+    corpus_status,
+    verify_corpus,
+)
 from benchstone.manifest import Benchmark
 
 
@@ -139,3 +144,51 @@ def test_corpus_type_defaults_to_bytes_when_none(tmp_path: Path) -> None:
     # with a warning. The verifier follows that default for back-compat.
     bench = _bench(corpus_hash=_sha256(payload), corpus_type=None)
     verify_corpus(bench, tmp_path)
+
+
+# --- corpus_status (discovery-time peek) -----------------------------------
+
+
+def test_corpus_status_na_when_no_hash(tmp_path: Path) -> None:
+    bench = _bench(corpus_path="anything", corpus_hash=None)
+    assert corpus_status(bench, tmp_path) == "n/a"
+
+
+def test_corpus_status_ok(tmp_path: Path) -> None:
+    payload = b"frozen corpus content"
+    (tmp_path / "corpus").write_bytes(payload)
+    bench = _bench(corpus_hash=_sha256(payload), corpus_type="bytes")
+    assert corpus_status(bench, tmp_path) == "ok"
+
+
+def test_corpus_status_drift(tmp_path: Path) -> None:
+    (tmp_path / "corpus").write_bytes(b"actual content")
+    bench = _bench(corpus_hash=_sha256(b"declared content"), corpus_type="bytes")
+    assert corpus_status(bench, tmp_path) == "drift"
+
+
+def test_corpus_status_missing_path(tmp_path: Path) -> None:
+    bench = _bench(
+        corpus_path="absent", corpus_hash=_sha256(b"x"), corpus_type="bytes"
+    )
+    assert corpus_status(bench, tmp_path) == "missing"
+
+
+def test_corpus_status_missing_when_path_unset(tmp_path: Path) -> None:
+    bench = _bench(corpus_path=None, corpus_hash=_sha256(b"x"))
+    assert corpus_status(bench, tmp_path) == "missing"
+
+
+def test_corpus_status_missing_for_spec_without_spec_file(tmp_path: Path) -> None:
+    (tmp_path / "corpus").mkdir()
+    bench = _bench(corpus_hash=_sha256(b"x"), corpus_type="spec")
+    assert corpus_status(bench, tmp_path) == "missing"
+
+
+def test_corpus_status_spec_ok(tmp_path: Path) -> None:
+    corpus_dir = tmp_path / "corpus"
+    corpus_dir.mkdir()
+    spec_bytes = b"[spec]\nseed = 7\n"
+    (corpus_dir / SPEC_FILENAME).write_bytes(spec_bytes)
+    bench = _bench(corpus_hash=_sha256(spec_bytes), corpus_type="spec")
+    assert corpus_status(bench, tmp_path) == "ok"

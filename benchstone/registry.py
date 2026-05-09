@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import json
+import warnings
 from dataclasses import dataclass
 from pathlib import Path
 
 from . import paths
+from .corpus import corpus_status
 from .manifest import load as load_manifest
 
 
@@ -57,6 +59,29 @@ class Registry:
         if not project_path.is_dir():
             raise RegistryError(f"project path is not a directory: {project_path}")
         manifest = load_manifest(project_path)
+        # Surface corpus drift at register time so re-registering after a
+        # corpus update gives the user immediate feedback. Run-time enforcement
+        # still happens in runner.execute via verify_corpus(); here we only
+        # warn so that re-registration can itself be the response to a
+        # legitimate corpus change (the user updates corpus_hash, then
+        # re-registers).
+        for b in manifest.benchmarks:
+            status = corpus_status(b, project_path)
+            if status == "drift":
+                warnings.warn(
+                    f"register: benchmark {b.name!r} corpus drift — on-disk "
+                    f"hash differs from manifest's recorded corpus_hash. "
+                    f"Update corpus_hash in the manifest if the change is "
+                    f"intentional, otherwise restore the corpus before running.",
+                    stacklevel=3,
+                )
+            elif status == "missing":
+                warnings.warn(
+                    f"register: benchmark {b.name!r} corpus is missing or "
+                    f"malformed at corpus_path={b.corpus_path!r} — runs will "
+                    f"fail until the corpus is in place.",
+                    stacklevel=3,
+                )
         data = self._read()
         projects = data.setdefault("projects", {})
         prior = projects.get(manifest.project.name)

@@ -8,6 +8,7 @@ import click
 from . import __version__, background, jobs, paths, references
 from ._timefmt import utc_now
 from .api import compute_verdict
+from .corpus import corpus_status
 from .gate import ALL_VERDICT_KINDS, Verdict
 from .manifest import Benchmark, ManifestError, Project, load as load_manifest
 from .provenance import GitState, ProvenanceError, git_state
@@ -86,9 +87,11 @@ def list_cmd(project: str | None) -> None:
             click.echo(f"  (manifest error: {exc})")
             continue
         for b in manifest.benchmarks:
+            corpus = corpus_status(b, p.path)
             click.echo(
                 f"  - {b.name}  tier={b.tier}  reps={b.repetitions}  "
                 f"threads={b.threads}  gpu={b.gpu}  bg_required={b.background_required}"
+                f"  corpus={corpus}"
             )
 
 

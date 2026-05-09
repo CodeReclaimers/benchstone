@@ -28,6 +28,9 @@ class CorpusError(Exception):
     """Raised when the on-disk corpus does not match the manifest's recorded hash."""
 
 
+CorpusStatus = str  # "ok" | "drift" | "missing" | "n/a"
+
+
 def verify_corpus(benchmark: Benchmark, project_path: Path) -> None:
     """Refuse to proceed if the on-disk corpus diverges from ``benchmark.corpus_hash``.
 
@@ -55,6 +58,45 @@ def verify_corpus(benchmark: Benchmark, project_path: Path) -> None:
             f"  type:      {corpus_type}\n"
             f"If the change is intentional, update corpus_hash in the manifest."
         )
+
+
+def corpus_status(benchmark: Benchmark, project_path: Path) -> CorpusStatus:
+    """Cheap summary of the on-disk corpus relative to the manifest's hash.
+
+    Returns one of:
+
+    - ``"n/a"``: the manifest does not pin a corpus_hash; nothing to verify.
+    - ``"ok"``: the on-disk corpus matches the recorded hash.
+    - ``"drift"``: corpus exists but does not match the recorded hash.
+    - ``"missing"``: corpus_path doesn't exist or has the wrong shape
+      (e.g. ``corpus_type='spec'`` without a spec file).
+
+    Used by ``bench list`` and ``bench register`` to surface drift without
+    blocking — ``verify_corpus`` is the run-time enforcer, this is the
+    discovery-time peek.
+    """
+    if benchmark.corpus_hash is None:
+        return "n/a"
+    if benchmark.corpus_path is None:
+        # corpus_hash declared without corpus_path: treat as missing input.
+        return "missing"
+    corpus_root = (project_path / benchmark.corpus_path).resolve()
+    corpus_type = benchmark.corpus_type or "bytes"
+    if not corpus_root.exists():
+        return "missing"
+    if corpus_type == "bytes" and not corpus_root.is_file():
+        return "missing"
+    if corpus_type == "spec":
+        if not corpus_root.is_dir():
+            return "missing"
+        if not (corpus_root / SPEC_FILENAME).is_file():
+            return "missing"
+    try:
+        actual = _hash_corpus(corpus_root, corpus_type, benchmark.name)
+    except CorpusError:
+        # Unknown corpus_type or other shape problem we didn't pre-check.
+        return "missing"
+    return "ok" if actual == benchmark.corpus_hash else "drift"
 
 
 def _hash_corpus(root: Path, corpus_type: str, bench_name: str) -> str:
